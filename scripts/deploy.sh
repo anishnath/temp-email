@@ -1,5 +1,5 @@
 #!/bin/bash
-source /home/ubuntu/go/src/temp-email/config/.env
+source /home/ubuntu/temp-email/config/.env
 cd /home/ubuntu/temp-email
 go build -o bin/temp-email ./cmd/api
 go build -o bin/process-email ./cmd/email-processor
