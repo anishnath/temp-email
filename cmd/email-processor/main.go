@@ -28,7 +28,14 @@ func main() {
 	}
 
 	from := msg.Header.Get("From")
-	to := msg.Header.Get("To")
+	addrHeader := msg.Header.Get("To")
+	toAddr, err := mail.ParseAddress(addrHeader)
+	var to string
+	if err != nil {
+		to = addrHeader // fallback
+	} else {
+		to = toAddr.Address
+	}
 	subject := msg.Header.Get("Subject")
 
 	var plaintextBody, htmlBody string

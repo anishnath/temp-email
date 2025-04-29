@@ -28,10 +28,12 @@ func GetEmails(address string) ([]Email, error) {
 	fmt.Println("DB Path:", dbPath)
 
 	rows, err := db.Query(`
-		SELECT sender, subject, plaintext_body, html_body, received_at
-		FROM emails
-		WHERE temp_address = ? AND expires_at > datetime('now')
-	`, address)
+	SELECT sender, subject, plaintext_body, html_body, received_at
+	FROM emails
+	WHERE (temp_address = ? OR temp_address LIKE '%<%' || ? || '%>')
+	  AND expires_at > datetime('now')
+`, address, address)
+
 	if err != nil {
 		return nil, err
 	}
