@@ -183,3 +183,11 @@ mailbox_command = /usr/bin/procmail
 ```text
 @goodbanners.xyz ubuntu
 ```
+
+```bash```
+sudo systemctl daemon-reload
+sudo systemctl enable temp-email.service
+sudo systemctl start temp-email.service
+sudo systemctl restart temp-email.service
+sudo systemctl status temp-email.service
+``````
