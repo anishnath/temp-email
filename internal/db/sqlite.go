@@ -2,16 +2,16 @@ package db
 
 import (
 	"database/sql"
-	"fmt"
 	_ "github.com/mattn/go-sqlite3"
 	"os"
 )
 
 type Email struct {
-	Sender     string
-	Subject    string
-	Body       string
-	ReceivedAt string
+	Sender        string
+	Subject       string
+	PlainTextBody string
+	HTMLBody      string
+	ReceivedAt    string
 }
 
 func GetEmails(address string) ([]Email, error) {
@@ -25,15 +25,12 @@ func GetEmails(address string) ([]Email, error) {
 	}
 	defer db.Close()
 
-	fmt.Println("DB Path:", dbPath)
-
 	rows, err := db.Query(`
-	SELECT sender, subject, plaintext_body, html_body, received_at
-	FROM emails
-	WHERE (temp_address = ? OR temp_address LIKE '%<%' || ? || '%>')
-	  AND expires_at > datetime('now')
-`, address, address)
-
+		SELECT sender, subject, plaintext_body, html_body, received_at
+		FROM emails
+		WHERE (temp_address = ? OR temp_address LIKE '%<%' || ? || '%>')
+		  AND expires_at > datetime('now')
+	`, address, address)
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +39,7 @@ func GetEmails(address string) ([]Email, error) {
 	var emails []Email
 	for rows.Next() {
 		var e Email
-		if err := rows.Scan(&e.Sender, &e.Subject, &e.Body, &e.ReceivedAt); err != nil {
+		if err := rows.Scan(&e.Sender, &e.Subject, &e.PlainTextBody, &e.HTMLBody, &e.ReceivedAt); err != nil {
 			return nil, err
 		}
 		emails = append(emails, e)
