@@ -1,1 +1,55 @@
-| /usr/local/bin/process-email
+# .procmailrc
+
+MAILDIR=$HOME/Mail
+LOGFILE=$HOME/procmail.log
+VERBOSE=yes
+
+SQLITE_DB=$HOME/emails.db
+
+# Ensure Maildir exists
+:0
+* ? test -d $MAILDIR || mkdir -p $MAILDIR
+
+# Process incoming email
+:0
+{
+  # Extract temp address from "To:" header
+  :0
+  * ^To:\/.*
+  {
+    TEMP_ADDRESS=`echo "$MATCH" | sed 's/^To:[ ]*//'`
+  }
+
+  # Extract Sender
+  :0
+  * ^From:\/.*
+  {
+    SENDER=`echo "$MATCH" | sed 's/^From:[ ]*//'`
+  }
+
+  # Extract Subject
+  :0
+  * ^Subject:\/.*
+  {
+    SUBJECT=`echo "$MATCH" | sed 's/^Subject:[ ]*//'`
+  }
+
+  # Extract Body (everything after headers)
+  BODY=`sed -e '1,/^$/d'`
+
+  # Escape single quotes for safe SQL
+  ESCAPED_BODY=`echo "$BODY" | sed "s/'/''/g"`
+
+  # Calculate expiry timestamp (+1 day)
+  EXPIRES=$(date -d "+1 day" '+%Y-%m-%d %H:%M:%S')
+
+  # Insert into SQLite3 database
+  :0
+  | ( echo "INSERT INTO emails (temp_address, sender, subject, body, expires_at) VALUES ( \
+    '$(echo "$TEMP_ADDRESS" | sed "s/'/''/g")', \
+    '$(echo "$SENDER" | sed "s/'/''/g")', \
+    '$(echo "$SUBJECT" | sed "s/'/''/g")', \
+    '$ESCAPED_BODY', \
+    '$EXPIRES' \
+  );" | sqlite3 "$SQLITE_DB" )
+}

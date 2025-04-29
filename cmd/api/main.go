@@ -37,6 +37,10 @@ func main() {
 		"http://localhost:8080",
 		"https://831f-2402-e280-2254-198-3993-c8a9-dbde-b0f4.ngrok-free.app",
 		"https://preview--temporary-inbox-now.lovable.app",
+		"https://procmail.xyz",
+		"https://api.procmail.xyz",
+		"https://goodbanners.xyz",
+		"https://8gwifi.org",
 	}
 
 	corsHandler := handlers.CORS(

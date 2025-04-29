@@ -1,0 +1,19 @@
+# /etc/systemd/system/temp-email.service
+
+[Unit]
+Description=Temp Email Service
+After=network.target
+
+[Service]
+Type=simple
+Environment=EMAIL_DOMAIN=goodbanners.xyz
+Environment=EMAIL_DB_PATH=/home/ubuntu/emails.db
+WorkingDirectory=/home/ubuntu
+ExecStart=/usr/local/bin/temp-email
+Restart=on-failure
+RestartSec=5s
+User=ubuntu
+Group=ubuntu
+
+[Install]
+WantedBy=multi-user.target

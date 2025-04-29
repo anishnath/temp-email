@@ -2,6 +2,11 @@ Setup Instructions for Ubuntu
 1. Install Dependencies
    Log in to your Ubuntu server via SSH:
 
+Linux Build 
+```bash
+CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o bin/temp-email ./cmd/api
+````
+
 RHEL 
 ```bash
 sudo yum install -y postfix
@@ -171,6 +176,7 @@ recipient_delimiter = +
 inet_interfaces = all
 inet_protocols = all
 virtual_alias_maps = hash:/etc/postfix/virtual
+mailbox_command = /usr/bin/procmail
 ``````
 
 `cat /etc/postfix/virtual`
