@@ -114,14 +114,16 @@ Run:
 ```sql
 sqlite3 /home/ubuntu/emails.db <<EOF
 CREATE TABLE IF NOT EXISTS emails (
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- temp_address TEXT,
- sender TEXT,
- subject TEXT,
- plaintext_body TEXT,
- html_body TEXT,
-    expires_at TEXT
-)
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    temp_address TEXT,
+    sender TEXT,
+    subject TEXT,
+    plaintext_body TEXT,
+    html_body TEXT,
+    expires_at TEXT,
+    received_at TEXT
+);
+
 EOF
 
 ```

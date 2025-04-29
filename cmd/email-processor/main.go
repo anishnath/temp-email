@@ -68,10 +68,11 @@ func main() {
 	}
 
 	expires := time.Now().Add(24 * time.Minute).Format("2006-01-02 15:04:05")
+	receivedAt := time.Now().Format("2006-01-02 15:04:05")
 
-	_, err = db.Exec(`INSERT INTO emails (temp_address, sender, subject, plaintext_body, html_body, expires_at) 
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		to, from, subject, plaintextBody, htmlBody, expires)
+	_, err = db.Exec(`INSERT INTO emails (temp_address, sender, subject, plaintext_body, html_body, expires_at, received_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		to, from, subject, plaintextBody, htmlBody, expires, receivedAt)
 	if err != nil {
 		panic(err)
 	}
