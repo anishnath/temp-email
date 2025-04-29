@@ -1,0 +1,13 @@
+# Updated .procmailrc
+
+MAILDIR=$HOME/Mail
+LOGFILE=$HOME/procmail.log
+VERBOSE=yes
+
+
+# Ensure Maildir exists
+:0
+* ? test -d $MAILDIR || mkdir -p $MAILDIR
+
+:0
+| (export EMAIL_DB_PATH=/home/ubuntu/emails.db EMAIL_DOMAIN=goodbanners.xyz; /usr/local/bin/process-email)

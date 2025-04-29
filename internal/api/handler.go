@@ -1,7 +1,7 @@
 package api
 
 import (
-	"fmt"
+	"encoding/json"
 	"net/http"
 	"os"
 	"strings"
@@ -26,13 +26,5 @@ func GetInbox(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, "[")
-	for i, email := range emails {
-		if i > 0 {
-			fmt.Fprintf(w, ",")
-		}
-		fmt.Fprintf(w, `{"sender":"%s","subject":"%s","body":"%s","received_at":"%s"}`,
-			email.Sender, email.Subject, email.Body, email.ReceivedAt)
-	}
-	fmt.Fprintf(w, "]")
+	json.NewEncoder(w).Encode(emails)
 }

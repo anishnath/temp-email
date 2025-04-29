@@ -112,15 +112,18 @@ sqlite3 /home/ubuntu/emails.db
 Run:
 
 ```sql
-CREATE TABLE emails (
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-temp_address TEXT,
-sender TEXT,
-subject TEXT,
-body TEXT,
-received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-expires_at DATETIME
-);
+sqlite3 /home/ubuntu/emails.db <<EOF
+CREATE TABLE IF NOT EXISTS emails (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ temp_address TEXT,
+ sender TEXT,
+ subject TEXT,
+ plaintext_body TEXT,
+ html_body TEXT,
+    expires_at TEXT
+)
+EOF
+
 ```
 
 
