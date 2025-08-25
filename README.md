@@ -53,7 +53,7 @@ go mod init temp-email
    Copy the .env.example file (provided below) and edit it:
 
 ```bash
-cp config/.env.example config/.env
+cp config/env.example config/.env
 vim config/.env
 ```
 Set:
@@ -61,6 +61,201 @@ Set:
 ```text
 EMAIL_DB_PATH=/home/ubuntu/emails.db
 EMAIL_DOMAIN=yourtempemail.com
+SERVER_PORT=8080
+```
+
+### Environment Variables
+
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `EMAIL_DOMAIN` | The domain for temporary email addresses | - | Yes |
+| `EMAIL_DB_PATH` | Path to the SQLite database file | - | Yes |
+| `SERVER_PORT` | Port number for the HTTP server | 8080 | No |
+
+### Server Configuration
+The server will start on the port specified by `SERVER_PORT` environment variable. If not set, it defaults to port 8080.
+
+## API Endpoints
+
+### Generate Temporary Email
+- **URL**: `GET /generate`
+- **Description**: Generates a random temporary email address
+- **Response**: Plain text email address
+
+### Get Inbox
+- **URL**: `GET /inbox/{address}`
+- **Description**: Retrieves emails for a specific temporary email address
+- **Parameters**: `address` - The temporary email address (must end with configured EMAIL_DOMAIN)
+- **Response**: JSON array of emails
+
+### Discover Subdomains
+- **URL**: `GET /subdomains/{domain}`
+- **Description**: Discovers subdomains for a given domain using the subfinder tool
+- **Parameters**: `domain` - The domain to search for subdomains (e.g., "example.com")
+- **Response**: JSON object containing subdomain information
+
+### Port Scanning
+- **URL**: `GET /portscan/{target}`
+- **Description**: Performs port scanning on a target using nmap
+- **Parameters**: 
+  - `target` - The target to scan (IP address, hostname, or domain)
+  - `scan_type` (query param) - Type of scan: `quick`, `top`, `full`, or `custom`
+  - `ports` (query param) - Custom ports for custom scan (e.g., "80,443,22,8080")
+- **Response**: JSON object containing port scan results
+
+#### Subdomain API Response Format
+```json
+{
+  "domain": "example.com",
+  "subdomains": [
+    {
+      "host": "www.example.com",
+      "input": "example.com",
+      "source": "crtsh"
+    },
+    {
+      "host": "mail.example.com",
+      "input": "example.com",
+      "source": "hackertarget"
+    }
+  ],
+  "count": 2,
+  "time_seconds": 3.124
+}
+```
+
+#### Port Scan API Response Format
+```json
+{
+  "target": "example.com",
+  "scan_type": "quick",
+  "ports": [
+    {
+      "port": 80,
+      "protocol": "tcp",
+      "state": "open",
+      "service": "http",
+      "version": "Apache httpd 2.4.41"
+    },
+    {
+      "port": 443,
+      "protocol": "tcp", 
+      "state": "open",
+      "service": "https",
+      "version": "Apache httpd 2.4.41"
+    }
+  ],
+  "open_ports": 2,
+  "total_ports": 2,
+  "scan_time_seconds": 1.23,
+  "status": "completed"
+}
+```
+
+#### Prerequisites
+The subfinder tool must be installed on the system for this endpoint to work. Install it using:
+```bash
+go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+```
+
+The nmap tool must be installed on the system for port scanning. Install it using:
+```bash
+# Ubuntu/Debian
+sudo apt install -y nmap
+
+# CentOS/RHEL/Fedora
+sudo yum install -y nmap
+
+# macOS
+brew install nmap
+
+# Or build from source
+wget https://nmap.org/dist/nmap-7.94.tar.bz2
+tar -xjf nmap-7.94.tar.bz2
+cd nmap-7.94
+./configure --prefix=/usr/local
+make
+sudo make install
+```
+
+The whois tool must be installed on the system for whois lookups. Install it using:
+```bash
+# Ubuntu/Debian
+sudo apt install -y whois
+
+# CentOS/RHEL/Fedora
+sudo yum install -y whois
+
+# macOS
+brew install whois
+
+# Or build from source (if not available in package manager)
+# Note: whois is usually available as a package on most systems
+```
+
+#### Example Usage
+```bash
+curl "http://localhost:8080/subdomains/pipedream.in"
+```
+
+#### Testing with Different Ports
+If you've configured a different port via `SERVER_PORT`, update the URL accordingly:
+```bash
+# If SERVER_PORT=3000
+curl "http://localhost:3000/subdomains/pipedream.in"
+
+# If SERVER_PORT=9000  
+curl "http://localhost:9000/subdomains/pipedream.in"
+```
+
+#### Error Responses
+- `400 Bad Request`: Invalid domain format or missing domain parameter
+- `500 Internal Server Error`: Subfinder tool not found or execution error
+- `408 Request Timeout`: Subfinder command timed out
+
+### Whois Lookup
+- **URL**: `GET /whois/{domain}`
+- **Description**: Performs whois lookup on a domain to get registration information
+- **Parameters**: `domain` - The domain to lookup (e.g., "example.com")
+- **Response**: JSON object containing whois information
+
+#### Whois API Response Format
+```json
+{
+  "domain": "example.com",
+  "registrar": "Example Registrar, Inc.",
+  "created": "2000-01-01T00:00:00Z",
+  "updated": "2023-01-01T00:00:00Z",
+  "expires": "2024-01-01T00:00:00Z",
+  "domain_status": "clientTransferProhibited",
+  "name_servers": [
+    "ns1.example.com",
+    "ns2.example.com"
+  ],
+  "raw_data": [
+    {
+      "field": "Registrar",
+      "value": "Example Registrar, Inc."
+    },
+    {
+      "field": "Created",
+      "value": "2000-01-01T00:00:00Z"
+    }
+  ],
+  "lookup_time_seconds": 0.85,
+  "status": "completed"
+}
+```
+
+#### Example Usage
+```bash
+# Basic whois lookup
+curl "http://localhost:8080/whois/example.com"
+
+# Lookup different TLDs
+curl "http://localhost:8080/whois/google.com"
+curl "http://localhost:8080/whois/github.com"
+curl "http://localhost:8080/whois/mozilla.org"
 ```
 
 4. Configure Postfix

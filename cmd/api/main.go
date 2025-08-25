@@ -8,10 +8,11 @@ import (
 	"os"
 	"time"
 
+	"temp-email/internal/api"
+
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
-	"temp-email/internal/api"
 )
 
 var emailDomain string
@@ -38,6 +39,8 @@ func main() {
 	r.HandleFunc("/generate", generateEmail).Methods("GET")
 	r.HandleFunc("/inbox/{address}", api.GetInbox).Methods("GET")
 	r.HandleFunc("/subdomains/{domain}", api.GetSubdomains).Methods("GET")
+	r.HandleFunc("/portscan/{target}", api.GetPortScan).Methods("GET")
+	r.HandleFunc("/whois/{domain}", api.GetWhois).Methods("GET")
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("static")))
 
 	allowedOrigins := []string{
@@ -45,6 +48,7 @@ func main() {
 		"http://localhost:8080",
 		"https://831f-2402-e280-2254-198-3993-c8a9-dbde-b0f4.ngrok-free.app",
 		"https://preview--temporary-inbox-now.lovable.app",
+		"https://procmail.xyz",
 		"https://procmail.xyz",
 		"https://api.procmail.xyz",
 		"https://goodbanners.xyz",
