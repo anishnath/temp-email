@@ -15,6 +15,7 @@ import (
 )
 
 var emailDomain string
+var serverPort string
 
 func init() {
 	if err := godotenv.Load("config/.env"); err != nil {
@@ -24,12 +25,19 @@ func init() {
 	if emailDomain == "" {
 		log.Fatal("EMAIL_DOMAIN is not set")
 	}
+
+	// Get server port from environment, default to 8080
+	serverPort = os.Getenv("SERVER_PORT")
+	if serverPort == "" {
+		serverPort = "8080"
+	}
 }
 
 func main() {
 	r := mux.NewRouter()
 	r.HandleFunc("/generate", generateEmail).Methods("GET")
 	r.HandleFunc("/inbox/{address}", api.GetInbox).Methods("GET")
+	r.HandleFunc("/subdomains/{domain}", api.GetSubdomains).Methods("GET")
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("static")))
 
 	allowedOrigins := []string{
@@ -47,13 +55,14 @@ func main() {
 		handlers.AllowedOrigins(allowedOrigins),
 		handlers.AllowedMethods([]string{"GET", "OPTIONS"}),
 		handlers.AllowedHeaders([]string{"Content-Type"}),
+		handlers.AllowCredentials(),
 	)
 
 	srv := &http.Server{
-		Addr:    ":8080",
+		Addr:    ":" + serverPort,
 		Handler: corsHandler(r),
 	}
-	log.Println("Starting server on :8080")
+	log.Println("Starting server on :" + serverPort)
 	log.Fatal(srv.ListenAndServe())
 }
 
