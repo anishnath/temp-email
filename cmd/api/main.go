@@ -46,6 +46,7 @@ func main() {
 	r.HandleFunc("/revdns/{ip}", api.GetReverseDNS).Methods("GET")
 	// DNS propagation checker
 	r.HandleFunc("/dnsprop/{name}", api.GetDNSPropagation).Methods("GET")
+	r.HandleFunc("/mtr/{target}", api.GetMTRTraceroute).Methods("GET")
 
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("static")))
 

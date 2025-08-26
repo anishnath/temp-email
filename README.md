@@ -341,6 +341,75 @@ curl "http://localhost:8080/sslscan/google.com?type=basic"
 curl "http://localhost:8080/sslscan/github.com?type=full"
 ```
 
+## MTR Traceroute API
+
+The MTR (My TraceRoute) API provides comprehensive network path analysis with statistical information about each hop.
+
+**Endpoint:** `GET /mtr/{target}`
+
+**Query Parameters:**
+- `mode` - Output mode: `report` (default), `raw`, or `json`
+- `packets` - Number of packets to send per hop (default: 10)
+- `interval` - Interval between packets in seconds (default: 1.0)
+- `timeout` - Timeout for each packet in seconds (default: 2.0)
+- `max_hops` - Maximum number of hops (default: 30)
+
+**Response Format:**
+```json
+{
+  "target": "google.com",
+  "source": "192.168.1.100",
+  "start_time": "2025-08-26T11:50:00Z",
+  "end_time": "2025-08-26T11:50:10Z",
+  "duration_seconds": 10.5,
+  "total_hops": 15,
+  "hops": [
+    {
+      "hop_number": 1,
+      "host": "router.local",
+      "ip": "192.168.1.1",
+      "loss_percent": 0.0,
+      "last_latency_ms": 1.2,
+      "avg_latency_ms": 1.1,
+      "best_latency_ms": 0.9,
+      "worst_latency_ms": 1.5,
+      "std_dev_ms": 0.2,
+      "jitter_ms": 0.6
+    }
+  ],
+  "summary": {
+    "total_packets": 1500,
+    "lost_packets": 15,
+    "overall_loss_percent": 1.0,
+    "min_latency_ms": 0.9,
+    "max_latency_ms": 45.2,
+    "avg_latency_ms": 12.3,
+    "jitter_ms": 8.7
+  }
+}
+```
+
+**Examples:**
+```bash
+# Basic traceroute
+curl "http://localhost:8080/mtr/google.com"
+
+# Raw mode with custom parameters
+curl "http://localhost:8080/mtr/google.com?mode=raw&packets=5&interval=0.5"
+
+# JSON mode with timeout settings
+curl "http://localhost:8080/mtr/cloudflare.com?mode=json&timeout=1.0&max_hops=20"
+```
+
+**Prerequisites:**
+- `mtr` tool must be installed and available in PATH
+- On macOS: `brew install mtr`
+- On Ubuntu/Debian: `sudo apt-get install mtr`
+- **Important**: MTR requires elevated privileges (sudo) to create raw sockets for network scanning
+- Run the server with sudo: `sudo go run ./cmd/api` or ensure proper socket permissions
+
+## Reverse DNS / PTR Lookup API
+
 4. Configure Postfix
    Edit /etc/postfix/main.cf:
 

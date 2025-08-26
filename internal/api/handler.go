@@ -20,6 +20,8 @@ import (
 	"temp-email/internal/db"
 	"time"
 
+	"math"
+
 	"github.com/gorilla/mux"
 )
 
@@ -1705,4 +1707,389 @@ func resolveWith(resolverIP, name, recordType string, ctx context.Context) ([]st
 		return txts, nil
 	}
 	return nil, fmt.Errorf("unsupported type")
+}
+
+// MTRHop represents a single hop in the traceroute
+type MTRHop struct {
+	HopNumber    int     `json:"hop_number"`
+	Host         string  `json:"host,omitempty"`
+	IP           string  `json:"ip,omitempty"`
+	LossPercent  float64 `json:"loss_percent"`
+	LastLatency  float64 `json:"last_latency_ms"`
+	AvgLatency   float64 `json:"avg_latency_ms"`
+	BestLatency  float64 `json:"best_latency_ms"`
+	WorstLatency float64 `json:"worst_latency_ms"`
+	StdDev       float64 `json:"std_dev_ms"`
+	Jitter       float64 `json:"jitter_ms"`
+}
+
+// MTRResponse represents the complete traceroute response
+type MTRResponse struct {
+	Target    string     `json:"target"`
+	Source    string     `json:"source"`
+	StartTime string     `json:"start_time"`
+	EndTime   string     `json:"end_time"`
+	Duration  float64    `json:"duration_seconds"`
+	TotalHops int        `json:"total_hops"`
+	Hops      []MTRHop   `json:"hops"`
+	Summary   MTRSummary `json:"summary"`
+}
+
+// MTRSummary provides statistical overview
+type MTRSummary struct {
+	TotalPackets int     `json:"total_packets"`
+	LostPackets  int     `json:"lost_packets"`
+	OverallLoss  float64 `json:"overall_loss_percent"`
+	MinLatency   float64 `json:"min_latency_ms"`
+	MaxLatency   float64 `json:"max_latency_ms"`
+	AvgLatency   float64 `json:"avg_latency_ms"`
+	Jitter       float64 `json:"jitter_ms"`
+}
+
+// GetMTRTraceroute performs traceroute using mtr with configurable options
+func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	target := strings.TrimSpace(vars["target"])
+	if target == "" {
+		http.Error(w, "target parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	// Parse query parameters for mtr options
+	packets := strings.TrimSpace(r.URL.Query().Get("packets"))
+	if packets == "" {
+		packets = "10" // default packets
+	}
+
+	interval := strings.TrimSpace(r.URL.Query().Get("interval"))
+	if interval == "" {
+		interval = "1.0" // default interval
+	}
+
+	timeout := strings.TrimSpace(r.URL.Query().Get("timeout"))
+	if timeout == "" {
+		timeout = "2.0" // default timeout
+	}
+
+	maxHops := strings.TrimSpace(r.URL.Query().Get("max_hops"))
+	if maxHops == "" {
+		maxHops = "30" // default max hops
+	}
+
+	// Validate parameters
+	if packets == "" || interval == "" || timeout == "" || maxHops == "" {
+		http.Error(w, "all parameters must be provided", http.StatusBadRequest)
+		return
+	}
+
+	// Build mtr command - use simpler, more compatible arguments
+	args := []string{
+		"--report",
+		"--report-cycles", packets,
+		target,
+	}
+
+	// Add optional parameters only if they're different from defaults
+	if interval != "1.0" {
+		args = append([]string{"--interval", interval}, args...)
+	}
+	if timeout != "2.0" {
+		args = append([]string{"--timeout", timeout}, args...)
+	}
+	if maxHops != "30" {
+		args = append([]string{"--max-ttl", maxHops}, args...)
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	// Execute command with proper error handling
+	cmd := exec.CommandContext(ctx, "mtr", args...)
+	startTime := time.Now()
+
+	// Execute command and capture output
+	output, err := cmd.Output()
+	endTime := time.Now()
+	duration := endTime.Sub(startTime).Seconds()
+
+	if err != nil {
+		// Check if mtr is not available
+		if strings.Contains(err.Error(), "executable file not found") {
+			http.Error(w, "mtr tool not found. Please install mtr (brew install mtr on macOS, apt-get install mtr on Ubuntu)", http.StatusServiceUnavailable)
+			return
+		}
+
+		// Check if it's a permission issue (needs sudo)
+		if strings.Contains(err.Error(), "Failure to open IPv4 sockets") || strings.Contains(err.Error(), "Invalid argument") {
+			http.Error(w, "mtr requires elevated privileges. Please run the server with sudo or ensure proper socket permissions.", http.StatusServiceUnavailable)
+			return
+		}
+
+		// For any other error, return the error details
+		http.Error(w, fmt.Sprintf("mtr execution failed: %v\nCommand: mtr %v", err, args), http.StatusInternalServerError)
+		return
+	}
+
+	// Parse mtr output - always use report mode for now
+	var hops []MTRHop
+	var summary MTRSummary
+
+	hops, summary = parseMTRReportOutput(string(output))
+
+	// Get source IP for context
+	sourceIP := getSourceIP()
+
+	resp := MTRResponse{
+		Target:    target,
+		Source:    sourceIP,
+		StartTime: startTime.Format(time.RFC3339),
+		EndTime:   endTime.Format(time.RFC3339),
+		Duration:  duration,
+		TotalHops: len(hops),
+		Hops:      hops,
+		Summary:   summary,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func parseMTRReportOutput(output string) ([]MTRHop, MTRSummary) {
+	hops := make([]MTRHop, 0)
+	lines := strings.Split(output, "\n")
+
+	//var totalPackets, lostPackets int
+	var allLatencies []float64
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "Start:") || strings.HasPrefix(line, "HOST:") {
+			continue
+		}
+
+		// Parse hop line: " 1.|-- 192.168.1.1                   0.0%     1    1.0   1.0   1.0   0.0   0.0"
+		parts := strings.Fields(line)
+		if len(parts) < 8 {
+			continue
+		}
+
+		hop := MTRHop{}
+
+		// Extract hop number
+		if hopNum, err := strconv.Atoi(strings.TrimSuffix(parts[0], ".")); err == nil {
+			hop.HopNumber = hopNum
+		}
+
+		// Extract IP address
+		if len(parts) > 1 && strings.HasPrefix(parts[1], "|--") {
+			if len(parts) > 2 {
+				hop.IP = parts[2]
+			}
+		} else if len(parts) > 1 {
+			hop.IP = parts[1]
+		}
+
+		// Extract loss percentage
+		if len(parts) > 2 {
+			lossStr := strings.TrimSuffix(parts[2], "%")
+			if loss, err := strconv.ParseFloat(lossStr, 64); err == nil {
+				hop.LossPercent = loss
+			}
+		}
+
+		// Extract latency statistics
+		if len(parts) > 6 {
+			if last, err := strconv.ParseFloat(parts[3], 64); err == nil {
+				hop.LastLatency = last
+				allLatencies = append(allLatencies, last)
+			}
+			if avg, err := strconv.ParseFloat(parts[4], 64); err == nil {
+				hop.AvgLatency = avg
+			}
+			if best, err := strconv.ParseFloat(parts[5], 64); err == nil {
+				hop.BestLatency = best
+			}
+			if worst, err := strconv.ParseFloat(parts[6], 64); err == nil {
+				hop.WorstLatency = worst
+			}
+			if stdDev, err := strconv.ParseFloat(parts[7], 64); err == nil {
+				hop.StdDev = stdDev
+			}
+		}
+
+		// Calculate jitter (difference between best and worst)
+		hop.Jitter = hop.WorstLatency - hop.BestLatency
+
+		hops = append(hops, hop)
+	}
+
+	// Calculate summary statistics
+	summary := calculateMTRSummary(hops, allLatencies)
+
+	return hops, summary
+}
+
+func parseMTRRawOutput(output string) ([]MTRHop, MTRSummary) {
+	// Raw mode is more verbose, parse key lines
+	hops := make([]MTRHop, 0)
+	lines := strings.Split(output, "\n")
+
+	var allLatencies []float64
+	hopMap := make(map[int]*MTRHop)
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Look for hop lines like " 1.  192.168.1.1"
+		if strings.Contains(line, ".") && strings.Contains(line, "ms") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				hopNumStr := strings.TrimSuffix(parts[0], ".")
+				if hopNum, err := strconv.Atoi(hopNumStr); err == nil {
+					hop, exists := hopMap[hopNum]
+					if !exists {
+						hop = &MTRHop{HopNumber: hopNum}
+						hopMap[hopNum] = hop
+					}
+
+					// Extract IP
+					if len(parts) > 1 {
+						hop.IP = parts[1]
+					}
+
+					// Extract latency
+					for _, part := range parts {
+						if strings.HasSuffix(part, "ms") {
+							if latency, err := strconv.ParseFloat(strings.TrimSuffix(part, "ms"), 64); err == nil {
+								hop.LastLatency = latency
+								allLatencies = append(allLatencies, latency)
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Convert map to slice and sort by hop number
+	for _, hop := range hopMap {
+		hops = append(hops, *hop)
+	}
+	sort.Slice(hops, func(i, j int) bool {
+		return hops[i].HopNumber < hops[j].HopNumber
+	})
+
+	summary := calculateMTRSummary(hops, allLatencies)
+	return hops, summary
+}
+
+func parseMTRJSONOutput(output string) ([]MTRHop, MTRSummary) {
+	// Try to parse JSON output directly
+	var jsonData struct {
+		Report struct {
+			Mtr struct {
+				Hubs []struct {
+					Count int     `json:"count"`
+					Host  string  `json:"host"`
+					Loss  float64 `json:"Loss%"`
+					Snt   int     `json:"Snt"`
+					Last  float64 `json:"Last"`
+					Avg   float64 `json:"Avg"`
+					Best  float64 `json:"Best"`
+					Wrst  float64 `json:"Wrst"`
+					StDev float64 `json:"StDev"`
+				} `json:"hubs"`
+			} `json:"mtr"`
+		} `json:"report"`
+	}
+
+	hops := make([]MTRHop, 0)
+	var allLatencies []float64
+
+	if err := json.Unmarshal([]byte(output), &jsonData); err == nil {
+		for i, hub := range jsonData.Report.Mtr.Hubs {
+			hop := MTRHop{
+				HopNumber:    i + 1,
+				Host:         hub.Host,
+				IP:           hub.Host,
+				LossPercent:  hub.Loss,
+				LastLatency:  hub.Last,
+				AvgLatency:   hub.Avg,
+				BestLatency:  hub.Best,
+				WorstLatency: hub.Wrst,
+				StdDev:       hub.StDev,
+			}
+			hop.Jitter = hop.WorstLatency - hop.BestLatency
+
+			if hub.Last > 0 {
+				allLatencies = append(allLatencies, hub.Last)
+			}
+
+			hops = append(hops, hop)
+		}
+	}
+
+	summary := calculateMTRSummary(hops, allLatencies)
+	return hops, summary
+}
+
+func calculateMTRSummary(hops []MTRHop, allLatencies []float64) MTRSummary {
+	summary := MTRSummary{}
+
+	if len(hops) == 0 {
+		return summary
+	}
+
+	// Calculate total and lost packets
+	totalPackets := 0
+	lostPackets := 0
+	for _, hop := range hops {
+		totalPackets += 100 // Assume 100 packets per hop
+		lostPackets += int(hop.LossPercent)
+	}
+
+	summary.TotalPackets = totalPackets
+	summary.LostPackets = lostPackets
+	summary.OverallLoss = float64(lostPackets) / float64(totalPackets) * 100
+
+	// Calculate latency statistics
+	if len(allLatencies) > 0 {
+		sort.Float64s(allLatencies)
+		summary.MinLatency = allLatencies[0]
+		summary.MaxLatency = allLatencies[len(allLatencies)-1]
+
+		sum := 0.0
+		for _, lat := range allLatencies {
+			sum += lat
+		}
+		summary.AvgLatency = sum / float64(len(allLatencies))
+
+		// Calculate jitter (standard deviation of latencies)
+		variance := 0.0
+		for _, lat := range allLatencies {
+			diff := lat - summary.AvgLatency
+			variance += diff * diff
+		}
+		summary.Jitter = math.Sqrt(variance / float64(len(allLatencies)))
+	}
+
+	return summary
+}
+
+func getSourceIP() string {
+	// Try to get local IP address
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "unknown"
+	}
+
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				return ipnet.IP.String()
+			}
+		}
+	}
+	return "unknown"
 }
