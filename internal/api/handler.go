@@ -1714,6 +1714,7 @@ type MTRHop struct {
 	HopNumber    int     `json:"hop_number"`
 	Host         string  `json:"host,omitempty"`
 	IP           string  `json:"ip,omitempty"`
+	SentPackets  int     `json:"sent_packets"`
 	LossPercent  float64 `json:"loss_percent"`
 	LastLatency  float64 `json:"last_latency_ms"`
 	AvgLatency   float64 `json:"avg_latency_ms"`
@@ -1790,12 +1791,13 @@ func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build mtr command - use simpler, more compatible arguments
+	// Build mtr command - use JSON output for easier parsing
 	args := []string{}
 
 	// Add flags first
 	args = append(args, "--report")
 	args = append(args, "--report-cycles", packets)
+	args = append(args, "--json")
 
 	// Add optional parameters only if they're different from defaults
 	if interval != "1.0" {
@@ -1816,10 +1818,6 @@ func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
 
 	// Execute command with proper error handling
 	cmd := exec.CommandContext(ctx, "mtr", args...)
-
-	// Debug: Print the command being executed
-	fmt.Printf("Executing MTR command: mtr %v\n", args)
-	fmt.Printf("Working directory: %s\n", cmd.Dir)
 
 	startTime := time.Now()
 
@@ -1847,11 +1845,11 @@ func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse mtr output - always use report mode for now
+	// Parse mtr JSON output
 	var hops []MTRHop
 	var summary MTRSummary
 
-	hops, summary = parseMTRReportOutput(string(output))
+	hops, summary = parseMTRJSONOutput(string(output))
 
 	// Get source IP for context
 	sourceIP := getSourceIP()
@@ -1871,144 +1869,13 @@ func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-func parseMTRReportOutput(output string) ([]MTRHop, MTRSummary) {
-	hops := make([]MTRHop, 0)
-	lines := strings.Split(output, "\n")
-
-	//var totalPackets, lostPackets int
-	var allLatencies []float64
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "Start:") || strings.HasPrefix(line, "HOST:") {
-			continue
-		}
-
-		// Parse hop line: " 1.|-- 192.168.1.1                   0.0%     1    1.0   1.0   1.0   0.0   0.0"
-		parts := strings.Fields(line)
-
-		if len(parts) < 9 {
-			continue
-		}
-
-		hop := MTRHop{}
-
-		// Extract hop number from "1.|--" format
-		hopNumStr := parts[0]
-		// Remove trailing dot and pipe characters
-		hopNumStr = strings.TrimSuffix(hopNumStr, ".")
-		hopNumStr = strings.TrimSuffix(hopNumStr, "|--")
-		hopNumStr = strings.TrimSuffix(hopNumStr, "|")
-
-		if hopNum, err := strconv.Atoi(hopNumStr); err == nil {
-			hop.HopNumber = hopNum
-		}
-
-		// Extract IP address - it's the second field
-		if len(parts) > 1 {
-			hop.IP = parts[1]
-		}
-
-		// Extract loss percentage
-		if len(parts) > 2 {
-			lossStr := strings.TrimSuffix(parts[2], "%")
-			if loss, err := strconv.ParseFloat(lossStr, 64); err == nil {
-				hop.LossPercent = loss
-			}
-		}
-
-		// Extract latency statistics
-		if len(parts) > 7 {
-			if last, err := strconv.ParseFloat(parts[4], 64); err == nil {
-				hop.LastLatency = last
-				allLatencies = append(allLatencies, last)
-			}
-			if avg, err := strconv.ParseFloat(parts[5], 64); err == nil {
-				hop.AvgLatency = avg
-			}
-			if best, err := strconv.ParseFloat(parts[6], 64); err == nil {
-				hop.BestLatency = best
-			}
-			if worst, err := strconv.ParseFloat(parts[7], 64); err == nil {
-				hop.WorstLatency = worst
-			}
-			if stdDev, err := strconv.ParseFloat(parts[8], 64); err == nil {
-				hop.StdDev = stdDev
-			}
-		}
-
-		// Calculate jitter (difference between best and worst)
-		hop.Jitter = hop.WorstLatency - hop.BestLatency
-
-		hops = append(hops, hop)
-	}
-
-	// Calculate summary statistics
-	summary := calculateMTRSummary(hops, allLatencies)
-
-	return hops, summary
-}
-
-func parseMTRRawOutput(output string) ([]MTRHop, MTRSummary) {
-	// Raw mode is more verbose, parse key lines
-	hops := make([]MTRHop, 0)
-	lines := strings.Split(output, "\n")
-
-	var allLatencies []float64
-	hopMap := make(map[int]*MTRHop)
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-
-		// Look for hop lines like " 1.  192.168.1.1"
-		if strings.Contains(line, ".") && strings.Contains(line, "ms") {
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				hopNumStr := strings.TrimSuffix(parts[0], ".")
-				if hopNum, err := strconv.Atoi(hopNumStr); err == nil {
-					hop, exists := hopMap[hopNum]
-					if !exists {
-						hop = &MTRHop{HopNumber: hopNum}
-						hopMap[hopNum] = hop
-					}
-
-					// Extract IP
-					if len(parts) > 1 {
-						hop.IP = parts[1]
-					}
-
-					// Extract latency
-					for _, part := range parts {
-						if strings.HasSuffix(part, "ms") {
-							if latency, err := strconv.ParseFloat(strings.TrimSuffix(part, "ms"), 64); err == nil {
-								hop.LastLatency = latency
-								allLatencies = append(allLatencies, latency)
-								break
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Convert map to slice and sort by hop number
-	for _, hop := range hopMap {
-		hops = append(hops, *hop)
-	}
-	sort.Slice(hops, func(i, j int) bool {
-		return hops[i].HopNumber < hops[j].HopNumber
-	})
-
-	summary := calculateMTRSummary(hops, allLatencies)
-	return hops, summary
-}
-
 func parseMTRJSONOutput(output string) ([]MTRHop, MTRSummary) {
-	// Try to parse JSON output directly
+	// Parse MTR JSON output directly
 	var jsonData struct {
 		Report struct {
 			Mtr struct {
+				Src  string `json:"src"`
+				Dst  string `json:"dst"`
 				Hubs []struct {
 					Count int     `json:"count"`
 					Host  string  `json:"host"`
@@ -2027,27 +1894,33 @@ func parseMTRJSONOutput(output string) ([]MTRHop, MTRSummary) {
 	hops := make([]MTRHop, 0)
 	var allLatencies []float64
 
-	if err := json.Unmarshal([]byte(output), &jsonData); err == nil {
-		for i, hub := range jsonData.Report.Mtr.Hubs {
-			hop := MTRHop{
-				HopNumber:    i + 1,
-				Host:         hub.Host,
-				IP:           hub.Host,
-				LossPercent:  hub.Loss,
-				LastLatency:  hub.Last,
-				AvgLatency:   hub.Avg,
-				BestLatency:  hub.Best,
-				WorstLatency: hub.Wrst,
-				StdDev:       hub.StDev,
-			}
-			hop.Jitter = hop.WorstLatency - hop.BestLatency
+	if err := json.Unmarshal([]byte(output), &jsonData); err != nil {
+		// If JSON parsing fails, return empty results
+		return hops, MTRSummary{}
+	}
 
-			if hub.Last > 0 {
-				allLatencies = append(allLatencies, hub.Last)
-			}
-
-			hops = append(hops, hop)
+	// Parse each hub into a hop
+	for _, hub := range jsonData.Report.Mtr.Hubs {
+		hop := MTRHop{
+			HopNumber:    hub.Count,
+			Host:         hub.Host,
+			IP:           hub.Host,
+			SentPackets:  hub.Snt,
+			LossPercent:  hub.Loss,
+			LastLatency:  hub.Last,
+			AvgLatency:   hub.Avg,
+			BestLatency:  hub.Best,
+			WorstLatency: hub.Wrst,
+			StdDev:       hub.StDev,
 		}
+		hop.Jitter = hop.WorstLatency - hop.BestLatency
+
+		// Only add non-zero latencies to the allLatencies slice
+		if hub.Last > 0 {
+			allLatencies = append(allLatencies, hub.Last)
+		}
+
+		hops = append(hops, hop)
 	}
 
 	summary := calculateMTRSummary(hops, allLatencies)
@@ -2061,12 +1934,12 @@ func calculateMTRSummary(hops []MTRHop, allLatencies []float64) MTRSummary {
 		return summary
 	}
 
-	// Calculate total and lost packets
+	// Calculate total and lost packets from actual data
 	totalPackets := 0
 	lostPackets := 0
 	for _, hop := range hops {
-		totalPackets += 100 // Assume 100 packets per hop
-		lostPackets += int(hop.LossPercent)
+		totalPackets += hop.SentPackets
+		lostPackets += int(float64(hop.SentPackets) * hop.LossPercent / 100.0)
 	}
 
 	summary.TotalPackets = totalPackets
