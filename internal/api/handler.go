@@ -1815,7 +1815,7 @@ func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// Execute command with proper error handling
-	cmd := exec.CommandContext(ctx, "mtr", args...)
+	cmd := exec.CommandContext(ctx, "/opt/homebrew/sbin/mtr", args...)
 
 	// Debug: Print the command being executed
 	fmt.Printf("Executing MTR command: mtr %v\n", args)
@@ -1831,7 +1831,7 @@ func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Check if mtr is not available
 		if strings.Contains(err.Error(), "executable file not found") {
-			http.Error(w, "mtr tool not found. Please install mtr (brew install mtr on macOS, apt-get install mtr on Ubuntu)", http.StatusServiceUnavailable)
+			http.Error(w, "mtr tool not found at /opt/homebrew/sbin/mtr. Please install mtr (brew install mtr on macOS, apt-get install mtr on Ubuntu)", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -1886,50 +1886,53 @@ func parseMTRReportOutput(output string) ([]MTRHop, MTRSummary) {
 
 		// Parse hop line: " 1.|-- 192.168.1.1                   0.0%     1    1.0   1.0   1.0   0.0   0.0"
 		parts := strings.Fields(line)
-		if len(parts) < 8 {
+
+		if len(parts) < 10 {
 			continue
 		}
 
 		hop := MTRHop{}
 
-		// Extract hop number
-		if hopNum, err := strconv.Atoi(strings.TrimSuffix(parts[0], ".")); err == nil {
+		// Extract hop number - handle "1." format
+		hopNumStr := parts[0]
+		// Remove trailing dot
+		hopNumStr = strings.TrimSuffix(hopNumStr, ".")
+
+		if hopNum, err := strconv.Atoi(hopNumStr); err == nil {
 			hop.HopNumber = hopNum
 		}
 
-		// Extract IP address
+		// Extract IP address - it's after the "|--" separator
 		if len(parts) > 1 && strings.HasPrefix(parts[1], "|--") {
 			if len(parts) > 2 {
 				hop.IP = parts[2]
 			}
-		} else if len(parts) > 1 {
-			hop.IP = parts[1]
 		}
 
 		// Extract loss percentage
-		if len(parts) > 2 {
-			lossStr := strings.TrimSuffix(parts[2], "%")
+		if len(parts) > 3 {
+			lossStr := strings.TrimSuffix(parts[3], "%")
 			if loss, err := strconv.ParseFloat(lossStr, 64); err == nil {
 				hop.LossPercent = loss
 			}
 		}
 
 		// Extract latency statistics
-		if len(parts) > 6 {
-			if last, err := strconv.ParseFloat(parts[3], 64); err == nil {
+		if len(parts) > 8 {
+			if last, err := strconv.ParseFloat(parts[5], 64); err == nil {
 				hop.LastLatency = last
 				allLatencies = append(allLatencies, last)
 			}
-			if avg, err := strconv.ParseFloat(parts[4], 64); err == nil {
+			if avg, err := strconv.ParseFloat(parts[6], 64); err == nil {
 				hop.AvgLatency = avg
 			}
-			if best, err := strconv.ParseFloat(parts[5], 64); err == nil {
+			if best, err := strconv.ParseFloat(parts[7], 64); err == nil {
 				hop.BestLatency = best
 			}
-			if worst, err := strconv.ParseFloat(parts[6], 64); err == nil {
+			if worst, err := strconv.ParseFloat(parts[8], 64); err == nil {
 				hop.WorstLatency = worst
 			}
-			if stdDev, err := strconv.ParseFloat(parts[7], 64); err == nil {
+			if stdDev, err := strconv.ParseFloat(parts[9], 64); err == nil {
 				hop.StdDev = stdDev
 			}
 		}
