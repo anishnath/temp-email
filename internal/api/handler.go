@@ -1880,25 +1880,7 @@ func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
 
 func parseMTRJSONOutput(output string) ([]MTRHop, MTRSummary) {
 	// Parse MTR JSON output directly
-	var jsonData struct {
-		Report struct {
-			Mtr struct {
-				Src  string `json:"src"`
-				Dst  string `json:"dst"`
-				Hubs []struct {
-					Count int     `json:"count"`
-					Host  string  `json:"host"`
-					Loss  float64 `json:"Loss%"`
-					Snt   int     `json:"Snt"`
-					Last  float64 `json:"Last"`
-					Avg   float64 `json:"Avg"`
-					Best  float64 `json:"Best"`
-					Wrst  float64 `json:"Wrst"`
-					StDev float64 `json:"StDev"`
-				} `json:"hubs"`
-			} `json:"mtr"`
-		} `json:"report"`
-	}
+	var jsonData map[string]interface{}
 
 	hops := make([]MTRHop, 0)
 	var allLatencies []float64
@@ -1910,27 +1892,66 @@ func parseMTRJSONOutput(output string) ([]MTRHop, MTRSummary) {
 		return hops, MTRSummary{}
 	}
 
-	fmt.Printf("DEBUG: Found %d hubs in JSON data\n", len(jsonData.Report.Mtr.Hubs))
+	// Debug: Print the parsed JSON data structure
+	fmt.Printf("DEBUG: JSON data structure: %+v\n", jsonData)
+
+	// Navigate through the JSON structure manually
+	report, ok := jsonData["report"].(map[string]interface{})
+	if !ok {
+		fmt.Printf("DEBUG: No 'report' key found in JSON\n")
+		return hops, MTRSummary{}
+	}
+
+	mtr, ok := report["mtr"].(map[string]interface{})
+	if !ok {
+		fmt.Printf("DEBUG: No 'mtr' key found in report\n")
+		return hops, MTRSummary{}
+	}
+
+	hubs, ok := mtr["hubs"].([]interface{})
+	if !ok {
+		fmt.Printf("DEBUG: No 'hubs' key found in mtr\n")
+		return hops, MTRSummary{}
+	}
+
+	fmt.Printf("DEBUG: Found %d hubs in JSON data\n", len(hubs))
 
 	// Parse each hub into a hop
-	for _, hub := range jsonData.Report.Mtr.Hubs {
+	for _, hubInterface := range hubs {
+		hub, ok := hubInterface.(map[string]interface{})
+		if !ok {
+			fmt.Printf("DEBUG: Hub is not a map: %v\n", hubInterface)
+			continue
+		}
+
+		// Extract values with type assertions
+		count, _ := hub["count"].(float64)
+		host, _ := hub["host"].(string)
+		loss, _ := hub["Loss%"].(float64)
+		snt, _ := hub["Snt"].(float64)
+		last, _ := hub["Last"].(float64)
+		avg, _ := hub["Avg"].(float64)
+		best, _ := hub["Best"].(float64)
+		worst, _ := hub["Wrst"].(float64)
+		stdev, _ := hub["StDev"].(float64)
+
 		hop := MTRHop{
-			HopNumber:    hub.Count,
-			Host:         hub.Host,
-			IP:           hub.Host,
-			SentPackets:  hub.Snt,
-			LossPercent:  hub.Loss,
-			LastLatency:  hub.Last,
-			AvgLatency:   hub.Avg,
-			BestLatency:  hub.Best,
-			WorstLatency: hub.Wrst,
-			StdDev:       hub.StDev,
+			HopNumber:    int(count),
+			Host:         host,
+			IP:           host,
+			SentPackets:  int(snt),
+			LossPercent:  loss,
+			LastLatency:  last,
+			AvgLatency:   avg,
+			BestLatency:  best,
+			WorstLatency: worst,
+			StdDev:       stdev,
 		}
 		hop.Jitter = hop.WorstLatency - hop.BestLatency
 
 		// Only add non-zero latencies to the allLatencies slice
-		if hub.Last > 0 {
-			allLatencies = append(allLatencies, hub.Last)
+		if last > 0 {
+			allLatencies = append(allLatencies, last)
 		}
 
 		hops = append(hops, hop)
