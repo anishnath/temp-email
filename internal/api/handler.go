@@ -8,12 +8,15 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"temp-email/internal/db"
 	"time"
 
@@ -124,6 +127,40 @@ type SSLTestResult struct {
 	Result   interface{} `json:"result,omitempty"`
 	Error    string      `json:"error,omitempty"`
 	Duration float64     `json:"duration_seconds,omitempty"`
+}
+
+// ReverseDNSResult represents PTR lookup result for a single IP
+type ReverseDNSResult struct {
+	IP        string   `json:"ip"`
+	Hostnames []string `json:"hostnames,omitempty"`
+	Error     string   `json:"error,omitempty"`
+	Duration  float64  `json:"duration_seconds,omitempty"`
+}
+
+// ReverseDNSResponse represents the response for reverse DNS lookups
+type ReverseDNSResponse struct {
+	QueryCount int                `json:"query_count"`
+	Results    []ReverseDNSResult `json:"results"`
+}
+
+// DNSPropagationResult represents resolution from a single resolver
+type DNSPropagationResult struct {
+	ResolverIP string   `json:"resolver_ip"`
+	Provider   string   `json:"provider,omitempty"`
+	RecordType string   `json:"record_type"`
+	Answers    []string `json:"answers,omitempty"`
+	Error      string   `json:"error,omitempty"`
+	Duration   float64  `json:"duration_seconds"`
+}
+
+// DNSPropagationResponse summarizes all resolver results
+type DNSPropagationResponse struct {
+	Name       string                 `json:"name"`
+	RecordType string                 `json:"record_type"`
+	QueriedAt  string                 `json:"queried_at"`
+	Results    []DNSPropagationResult `json:"results"`
+	Consensus  bool                   `json:"consensus"`
+	UniqueSets int                    `json:"unique_answer_sets"`
 }
 
 func GetInbox(w http.ResponseWriter, r *http.Request) {
@@ -1446,4 +1483,226 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+// GetReverseDNS performs PTR lookups for one or multiple comma-separated IPs
+func GetReverseDNS(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	ipParam := vars["ip"]
+	if strings.TrimSpace(ipParam) == "" {
+		http.Error(w, "IP parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	ips := strings.Split(ipParam, ",")
+	resolver := &net.Resolver{}
+	results := make([]ReverseDNSResult, 0, len(ips))
+
+	for _, raw := range ips {
+		ipStr := strings.TrimSpace(raw)
+		if ipStr == "" {
+			continue
+		}
+		parsed := net.ParseIP(ipStr)
+		if parsed == nil {
+			results = append(results, ReverseDNSResult{IP: ipStr, Error: "invalid ip address"})
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		start := time.Now()
+		names, err := resolver.LookupAddr(ctx, ipStr)
+		cancel()
+		dur := time.Since(start).Seconds()
+		res := ReverseDNSResult{IP: ipStr, Duration: dur}
+		if err != nil {
+			res.Error = err.Error()
+		} else {
+			res.Hostnames = names
+		}
+		results = append(results, res)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(ReverseDNSResponse{QueryCount: len(results), Results: results})
+}
+
+// GetDNSPropagation checks DNS answers across multiple resolvers
+func GetDNSPropagation(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	name := strings.TrimSpace(vars["name"])
+	if name == "" {
+		http.Error(w, "name parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	recordType := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("type")))
+	if recordType == "" {
+		recordType = "A"
+	}
+	valid := map[string]bool{"A": true, "AAAA": true, "MX": true, "NS": true, "TXT": true, "CNAME": true}
+	if !valid[recordType] {
+		http.Error(w, "unsupported record type", http.StatusBadRequest)
+		return
+	}
+
+	// Default resolver pool (IP -> provider)
+	defaultResolvers := map[string]string{
+		"1.1.1.1":         "Cloudflare",
+		"1.0.0.1":         "Cloudflare",
+		"8.8.8.8":         "Google",
+		"8.8.4.4":         "Google",
+		"9.9.9.9":         "Quad9",
+		"149.112.112.112": "Quad9",
+		"208.67.222.222":  "OpenDNS",
+		"208.67.220.220":  "OpenDNS",
+		"94.140.14.14":    "AdGuard",
+		"76.76.2.0":       "ControlD",
+	}
+
+	// Optional custom resolvers
+	resolverParam := strings.TrimSpace(r.URL.Query().Get("resolvers"))
+	resolvers := make([][2]string, 0)
+	if resolverParam != "" {
+		for _, s := range strings.Split(resolverParam, ",") {
+			ip := strings.TrimSpace(s)
+			if net.ParseIP(ip) != nil {
+				resolvers = append(resolvers, [2]string{ip, "custom"})
+			}
+		}
+	}
+	if len(resolvers) == 0 {
+		for ip, provider := range defaultResolvers {
+			resolvers = append(resolvers, [2]string{ip, provider})
+		}
+	}
+
+	ctx := r.Context()
+	var mu sync.Mutex
+	results := make([]DNSPropagationResult, 0, len(resolvers))
+	wg := sync.WaitGroup{}
+	wg.Add(len(resolvers))
+
+	for _, pair := range resolvers {
+		resolverIP, provider := pair[0], pair[1]
+		go func(resIP, prov string) {
+			defer wg.Done()
+			start := time.Now()
+			answers, err := resolveWith(resIP, name, recordType, ctx)
+			dur := time.Since(start).Seconds()
+			res := DNSPropagationResult{
+				ResolverIP: resIP,
+				Provider:   prov,
+				RecordType: recordType,
+				Duration:   dur,
+			}
+			if err != nil {
+				res.Error = err.Error()
+			} else {
+				res.Answers = answers
+			}
+			mu.Lock()
+			results = append(results, res)
+			mu.Unlock()
+		}(resolverIP, provider)
+	}
+	wg.Wait()
+
+	// Compute consensus: unique sets of answers across resolvers
+	unique := make(map[string]struct{})
+	for _, res := range results {
+		key := strings.Join(res.Answers, ",")
+		unique[key] = struct{}{}
+	}
+	// remove empty key if errors
+	if _, ok := unique[""]; ok && len(unique) > 1 {
+		delete(unique, "")
+	}
+	consensus := len(unique) <= 1
+
+	resp := DNSPropagationResponse{
+		Name:       name,
+		RecordType: recordType,
+		QueriedAt:  time.Now().UTC().Format(time.RFC3339),
+		Results:    results,
+		Consensus:  consensus,
+		UniqueSets: len(unique),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func resolveWith(resolverIP, name, recordType string, ctx context.Context) ([]string, error) {
+	// Custom resolver dialing specific DNS server
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 3 * time.Second}
+			return d.DialContext(ctx, "udp", net.JoinHostPort(resolverIP, "53"))
+		},
+	}
+	timeCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+
+	switch recordType {
+	case "A":
+		ips, err := resolver.LookupIP(timeCtx, "ip4", name)
+		if err != nil {
+			return nil, err
+		}
+		ans := make([]string, 0, len(ips))
+		for _, ip := range ips {
+			ans = append(ans, ip.String())
+		}
+		sort.Strings(ans)
+		return ans, nil
+	case "AAAA":
+		ips, err := resolver.LookupIP(timeCtx, "ip6", name)
+		if err != nil {
+			return nil, err
+		}
+		ans := make([]string, 0, len(ips))
+		for _, ip := range ips {
+			ans = append(ans, ip.String())
+		}
+		sort.Strings(ans)
+		return ans, nil
+	case "CNAME":
+		c, err := resolver.LookupCNAME(timeCtx, name)
+		if err != nil {
+			return nil, err
+		}
+		return []string{strings.TrimSuffix(c, ".")}, nil
+	case "MX":
+		mx, err := resolver.LookupMX(timeCtx, name)
+		if err != nil {
+			return nil, err
+		}
+		ans := make([]string, 0, len(mx))
+		for _, m := range mx {
+			ans = append(ans, fmt.Sprintf("%d %s", m.Pref, strings.TrimSuffix(m.Host, ".")))
+		}
+		sort.Strings(ans)
+		return ans, nil
+	case "NS":
+		ns, err := resolver.LookupNS(timeCtx, name)
+		if err != nil {
+			return nil, err
+		}
+		ans := make([]string, 0, len(ns))
+		for _, n := range ns {
+			ans = append(ans, strings.TrimSuffix(n.Host, "."))
+		}
+		sort.Strings(ans)
+		return ans, nil
+	case "TXT":
+		txts, err := resolver.LookupTXT(timeCtx, name)
+		if err != nil {
+			return nil, err
+		}
+		sort.Strings(txts)
+		return txts, nil
+	}
+	return nil, fmt.Errorf("unsupported type")
 }

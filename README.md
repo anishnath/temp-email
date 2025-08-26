@@ -193,6 +193,24 @@ brew install whois
 # Note: whois is usually available as a package on most systems
 ```
 
+The SSL scanning tools must be installed for SSL certificate analysis. Install them using:
+```bash
+# OpenSSL (usually pre-installed)
+sudo apt install -y openssl
+
+# Nmap with SSL scripts
+sudo apt install -y nmap
+
+# testssl.sh (comprehensive SSL testing)
+git clone https://github.com/drwetter/testssl.sh.git
+chmod +x testssl.sh/testssl.sh
+
+# Verify installations
+openssl version
+nmap --version
+./testssl.sh/testssl.sh --version
+```
+
 #### Example Usage
 ```bash
 curl "http://localhost:8080/subdomains/pipedream.in"
@@ -256,6 +274,71 @@ curl "http://localhost:8080/whois/example.com"
 curl "http://localhost:8080/whois/google.com"
 curl "http://localhost:8080/whois/github.com"
 curl "http://localhost:8080/whois/mozilla.org"
+```
+
+### SSL Certificate Scanner
+- **URL**: `GET /sslscan/{domain}`
+- **Description**: Performs SSL certificate scanning and security analysis
+- **Parameters**: 
+  - `domain` - The domain to scan (e.g., "example.com")
+  - `type` (query param) - Type of scan: `basic`, `quick`, or `full`
+  - `port` (query param) - Port to scan (default: 443)
+- **Response**: JSON object containing SSL certificate and security information
+
+#### SSL Scan Types
+- **basic** (default): Certificate info + basic security using OpenSSL and nmap
+- **quick**: Fast check using Go's crypto/tls package
+- **full**: Comprehensive analysis using testssl.sh for vulnerability detection
+
+#### SSL Scanner API Response Format
+```json
+{
+  "domain": "example.com",
+  "port": 443,
+  "scan_type": "basic",
+  "certificate": {
+    "subject": "CN=example.com",
+    "issuer": "CN=DigiCert Inc, O=DigiCert Inc, C=US",
+    "valid_from": "2023-01-01T00:00:00Z",
+    "valid_until": "2024-01-01T00:00:00Z",
+    "serial_number": "1234567890abcdef",
+    "signature_algorithm": "sha256WithRSAEncryption",
+    "public_key_algorithm": "rsaEncryption",
+    "public_key_size": 2048
+  },
+  "security": {
+    "tls_versions": ["TLSv1.2", "TLSv1.3"],
+    "supported_ciphers": ["TLS_AES_256_GCM_SHA384", "TLS_CHACHA20_POLY1305_SHA256"],
+    "weak_ciphers": [],
+    "heartbleed_vulnerable": false,
+    "beast_vulnerable": false,
+    "poodle_vulnerable": false,
+    "certificate_transparency": true,
+    "hsts_enabled": true
+  },
+  "vulnerabilities": [],
+  "scan_time_seconds": 2.45,
+  "status": "completed"
+}
+```
+
+#### Example Usage
+```bash
+# Basic SSL scan (default)
+curl "http://localhost:8080/sslscan/example.com"
+
+# Quick SSL scan
+curl "http://localhost:8080/sslscan/example.com?type=quick"
+
+# Full SSL scan with vulnerability detection
+curl "http://localhost:8080/sslscan/example.com?type=full"
+
+# SSL scan on custom port
+curl "http://localhost:8080/sslscan/example.com?port=8443"
+
+# Different domains
+curl "http://localhost:8080/sslscan/google.com?type=basic"
+curl "http://localhost:8080/sslscan/github.com?type=full"
 ```
 
 4. Configure Postfix

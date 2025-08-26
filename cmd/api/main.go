@@ -42,6 +42,11 @@ func main() {
 	r.HandleFunc("/portscan/{target}", api.GetPortScan).Methods("GET")
 	r.HandleFunc("/whois/{domain}", api.GetWhois).Methods("GET")
 	r.HandleFunc("/sslscan/{domain}", api.GetSSLScan).Methods("GET")
+	// Reverse DNS / PTR: supports single or comma-separated IPs
+	r.HandleFunc("/revdns/{ip}", api.GetReverseDNS).Methods("GET")
+	// DNS propagation checker
+	r.HandleFunc("/dnsprop/{name}", api.GetDNSPropagation).Methods("GET")
+
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("static")))
 
 	allowedOrigins := []string{
