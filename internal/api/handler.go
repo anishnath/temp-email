@@ -1815,7 +1815,7 @@ func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// Execute command with proper error handling
-	cmd := exec.CommandContext(ctx, "/opt/homebrew/sbin/mtr", args...)
+	cmd := exec.CommandContext(ctx, "mtr", args...)
 
 	// Debug: Print the command being executed
 	fmt.Printf("Executing MTR command: mtr %v\n", args)
@@ -1831,7 +1831,7 @@ func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Check if mtr is not available
 		if strings.Contains(err.Error(), "executable file not found") {
-			http.Error(w, "mtr tool not found at /opt/homebrew/sbin/mtr. Please install mtr (brew install mtr on macOS, apt-get install mtr on Ubuntu)", http.StatusServiceUnavailable)
+			http.Error(w, "mtr tool not found at mtr. Please install mtr (brew install mtr on macOS, apt-get install mtr on Ubuntu)", http.StatusServiceUnavailable)
 			return
 		}
 
