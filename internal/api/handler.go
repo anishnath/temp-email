@@ -20,6 +20,7 @@ import (
 	"temp-email/internal/db"
 	"time"
 
+	"bytes"
 	"math"
 
 	"github.com/gorilla/mux"
@@ -1782,33 +1783,49 @@ func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build mtr command - use simpler, more compatible arguments
-	args := []string{
-		"--report",
-		"--report-cycles", packets,
-		target,
+	// Validate MTR-specific restrictions
+	if intervalFloat, err := strconv.ParseFloat(interval, 64); err == nil {
+		if intervalFloat < 1.0 {
+			http.Error(w, "MTR requires elevated privileges for intervals < 1.0 seconds. Use interval >= 1.0 or run with sudo.", http.StatusBadRequest)
+			return
+		}
 	}
+
+	// Build mtr command - use simpler, more compatible arguments
+	args := []string{}
+
+	// Add flags first
+	args = append(args, "--report")
+	args = append(args, "--report-cycles", packets)
 
 	// Add optional parameters only if they're different from defaults
 	if interval != "1.0" {
-		args = append([]string{"--interval", interval}, args...)
+		args = append(args, "--interval", interval)
 	}
 	if timeout != "2.0" {
-		args = append([]string{"--timeout", timeout}, args...)
+		args = append(args, "--timeout", timeout)
 	}
 	if maxHops != "30" {
-		args = append([]string{"--max-ttl", maxHops}, args...)
+		args = append(args, "--max-ttl", maxHops)
 	}
+
+	// Add target last
+	args = append(args, target)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
 	// Execute command with proper error handling
-	cmd := exec.CommandContext(ctx, "mtr", args...)
+	cmd := exec.CommandContext(ctx, "/opt/homebrew/Cellar/mtr/0.96/sbin/mtr", args...)
+
+	// Debug: Print the command being executed
+	fmt.Printf("Executing MTR command: /opt/homebrew/Cellar/mtr/0.96/sbin/mtr %v\n", args)
+	fmt.Printf("Working directory: %s\n", cmd.Dir)
+
 	startTime := time.Now()
 
-	// Execute command and capture output
-	output, err := cmd.Output()
+	// Execute command and capture both stdout and stderr
+	output, err := cmd.CombinedOutput()
 	endTime := time.Now()
 	duration := endTime.Sub(startTime).Seconds()
 
@@ -1820,13 +1837,14 @@ func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Check if it's a permission issue (needs sudo)
-		if strings.Contains(err.Error(), "Failure to open IPv4 sockets") || strings.Contains(err.Error(), "Invalid argument") {
+		if strings.Contains(string(output), "Failure to open IPv4 sockets") || strings.Contains(string(output), "Invalid argument") {
 			http.Error(w, "mtr requires elevated privileges. Please run the server with sudo or ensure proper socket permissions.", http.StatusServiceUnavailable)
 			return
 		}
 
-		// For any other error, return the error details
-		http.Error(w, fmt.Sprintf("mtr execution failed: %v\nCommand: mtr %v", err, args), http.StatusInternalServerError)
+		// For any other error, return the error details with output
+		errorMsg := fmt.Sprintf("mtr execution failed: %v\nCommand: mtr %v\nOutput: %s", err, args, string(output))
+		http.Error(w, errorMsg, http.StatusInternalServerError)
 		return
 	}
 
