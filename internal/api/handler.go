@@ -1815,10 +1815,10 @@ func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// Execute command with proper error handling
-	cmd := exec.CommandContext(ctx, "/opt/homebrew/Cellar/mtr/0.96/sbin/mtr", args...)
+	cmd := exec.CommandContext(ctx, "mtr", args...)
 
 	// Debug: Print the command being executed
-	fmt.Printf("Executing MTR command: /opt/homebrew/Cellar/mtr/0.96/sbin/mtr %v\n", args)
+	fmt.Printf("Executing MTR command: mtr %v\n", args)
 	fmt.Printf("Working directory: %s\n", cmd.Dir)
 
 	startTime := time.Now()
