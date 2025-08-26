@@ -1902,15 +1902,10 @@ func parseMTRJSONOutput(output string) ([]MTRHop, MTRSummary) {
 		return hops, MTRSummary{}
 	}
 
-	mtr, ok := report["mtr"].(map[string]interface{})
+	// Hubs is at the same level as mtr, not inside mtr
+	hubs, ok := report["hubs"].([]interface{})
 	if !ok {
-		fmt.Printf("DEBUG: No 'mtr' key found in report\n")
-		return hops, MTRSummary{}
-	}
-
-	hubs, ok := mtr["hubs"].([]interface{})
-	if !ok {
-		fmt.Printf("DEBUG: No 'hubs' key found in mtr\n")
+		fmt.Printf("DEBUG: No 'hubs' key found in report\n")
 		return hops, MTRSummary{}
 	}
 
