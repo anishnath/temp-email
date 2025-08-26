@@ -1819,12 +1819,21 @@ func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
 	// Execute command with proper error handling
 	cmd := exec.CommandContext(ctx, "mtr", args...)
 
+	// Debug: Print the command being executed
+	fmt.Printf("DEBUG: Executing MTR command: mtr %v\n", args)
+
 	startTime := time.Now()
 
 	// Execute command and capture both stdout and stderr
 	output, err := cmd.CombinedOutput()
 	endTime := time.Now()
 	duration := endTime.Sub(startTime).Seconds()
+
+	// Debug: Print the raw output and error
+	fmt.Printf("DEBUG: MTR command output:\n%s\n", string(output))
+	if err != nil {
+		fmt.Printf("DEBUG: MTR command error: %v\n", err)
+	}
 
 	if err != nil {
 		// Check if mtr is not available
@@ -1896,8 +1905,12 @@ func parseMTRJSONOutput(output string) ([]MTRHop, MTRSummary) {
 
 	if err := json.Unmarshal([]byte(output), &jsonData); err != nil {
 		// If JSON parsing fails, return empty results
+		fmt.Printf("DEBUG: JSON parsing failed: %v\n", err)
+		fmt.Printf("DEBUG: Raw output was: %s\n", output)
 		return hops, MTRSummary{}
 	}
+
+	fmt.Printf("DEBUG: Found %d hubs in JSON data\n", len(jsonData.Report.Mtr.Hubs))
 
 	// Parse each hub into a hop
 	for _, hub := range jsonData.Report.Mtr.Hubs {
