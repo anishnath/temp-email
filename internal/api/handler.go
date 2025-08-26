@@ -1828,6 +1828,12 @@ func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
 	endTime := time.Now()
 	duration := endTime.Sub(startTime).Seconds()
 
+	// Debug: Print the raw output and error
+	fmt.Printf("DEBUG: MTR command output:\n%s\n", string(output))
+	if err != nil {
+		fmt.Printf("DEBUG: MTR command error: %v\n", err)
+	}
+
 	if err != nil {
 		// Check if mtr is not available
 		if strings.Contains(err.Error(), "executable file not found") {
@@ -1875,19 +1881,32 @@ func parseMTRReportOutput(output string) ([]MTRHop, MTRSummary) {
 	hops := make([]MTRHop, 0)
 	lines := strings.Split(output, "\n")
 
+	fmt.Printf("DEBUG: parseMTRReportOutput called with %d lines\n", len(lines))
+	fmt.Printf("DEBUG: First few lines:\n")
+	for i, line := range lines {
+		if i >= 5 {
+			break
+		}
+		fmt.Printf("  Line %d: '%s'\n", i, line)
+	}
+
 	//var totalPackets, lostPackets int
 	var allLatencies []float64
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "Start:") || strings.HasPrefix(line, "HOST:") {
+			fmt.Printf("DEBUG: Skipping line (empty/header): '%s'\n", line)
 			continue
 		}
 
 		// Parse hop line: " 1.|-- 192.168.1.1                   0.0%     1    1.0   1.0   1.0   0.0   0.0"
 		parts := strings.Fields(line)
+		fmt.Printf("DEBUG: Processing line: '%s'\n", line)
+		fmt.Printf("DEBUG: Line parts: %v (length: %d)\n", parts, len(parts))
 
 		if len(parts) < 10 {
+			fmt.Printf("DEBUG: Skipping line with insufficient parts (need 10, got %d)\n", len(parts))
 			continue
 		}
 
@@ -1940,6 +1959,7 @@ func parseMTRReportOutput(output string) ([]MTRHop, MTRSummary) {
 		// Calculate jitter (difference between best and worst)
 		hop.Jitter = hop.WorstLatency - hop.BestLatency
 
+		fmt.Printf("DEBUG: Successfully parsed hop: %+v\n", hop)
 		hops = append(hops, hop)
 	}
 
