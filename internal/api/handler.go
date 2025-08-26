@@ -20,7 +20,6 @@ import (
 	"temp-email/internal/db"
 	"time"
 
-	"bytes"
 	"math"
 
 	"github.com/gorilla/mux"
