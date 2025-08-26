@@ -1828,12 +1828,6 @@ func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
 	endTime := time.Now()
 	duration := endTime.Sub(startTime).Seconds()
 
-	// Debug: Print the raw output and error
-	fmt.Printf("DEBUG: MTR command output:\n%s\n", string(output))
-	if err != nil {
-		fmt.Printf("DEBUG: MTR command error: %v\n", err)
-	}
-
 	if err != nil {
 		// Check if mtr is not available
 		if strings.Contains(err.Error(), "executable file not found") {
@@ -1881,77 +1875,64 @@ func parseMTRReportOutput(output string) ([]MTRHop, MTRSummary) {
 	hops := make([]MTRHop, 0)
 	lines := strings.Split(output, "\n")
 
-	fmt.Printf("DEBUG: parseMTRReportOutput called with %d lines\n", len(lines))
-	fmt.Printf("DEBUG: First few lines:\n")
-	for i, line := range lines {
-		if i >= 5 {
-			break
-		}
-		fmt.Printf("  Line %d: '%s'\n", i, line)
-	}
-
 	//var totalPackets, lostPackets int
 	var allLatencies []float64
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "Start:") || strings.HasPrefix(line, "HOST:") {
-			fmt.Printf("DEBUG: Skipping line (empty/header): '%s'\n", line)
 			continue
 		}
 
 		// Parse hop line: " 1.|-- 192.168.1.1                   0.0%     1    1.0   1.0   1.0   0.0   0.0"
 		parts := strings.Fields(line)
-		fmt.Printf("DEBUG: Processing line: '%s'\n", line)
-		fmt.Printf("DEBUG: Line parts: %v (length: %d)\n", parts, len(parts))
 
-		if len(parts) < 10 {
-			fmt.Printf("DEBUG: Skipping line with insufficient parts (need 10, got %d)\n", len(parts))
+		if len(parts) < 9 {
 			continue
 		}
 
 		hop := MTRHop{}
 
-		// Extract hop number - handle "1." format
+		// Extract hop number from "1.|--" format
 		hopNumStr := parts[0]
-		// Remove trailing dot
+		// Remove trailing dot and pipe characters
 		hopNumStr = strings.TrimSuffix(hopNumStr, ".")
+		hopNumStr = strings.TrimSuffix(hopNumStr, "|--")
+		hopNumStr = strings.TrimSuffix(hopNumStr, "|")
 
 		if hopNum, err := strconv.Atoi(hopNumStr); err == nil {
 			hop.HopNumber = hopNum
 		}
 
-		// Extract IP address - it's after the "|--" separator
-		if len(parts) > 1 && strings.HasPrefix(parts[1], "|--") {
-			if len(parts) > 2 {
-				hop.IP = parts[2]
-			}
+		// Extract IP address - it's the second field
+		if len(parts) > 1 {
+			hop.IP = parts[1]
 		}
 
 		// Extract loss percentage
-		if len(parts) > 3 {
-			lossStr := strings.TrimSuffix(parts[3], "%")
+		if len(parts) > 2 {
+			lossStr := strings.TrimSuffix(parts[2], "%")
 			if loss, err := strconv.ParseFloat(lossStr, 64); err == nil {
 				hop.LossPercent = loss
 			}
 		}
 
 		// Extract latency statistics
-		if len(parts) > 8 {
-			if last, err := strconv.ParseFloat(parts[5], 64); err == nil {
+		if len(parts) > 7 {
+			if last, err := strconv.ParseFloat(parts[4], 64); err == nil {
 				hop.LastLatency = last
 				allLatencies = append(allLatencies, last)
 			}
-			if avg, err := strconv.ParseFloat(parts[6], 64); err == nil {
+			if avg, err := strconv.ParseFloat(parts[5], 64); err == nil {
 				hop.AvgLatency = avg
 			}
-			if best, err := strconv.ParseFloat(parts[7], 64); err == nil {
+			if best, err := strconv.ParseFloat(parts[6], 64); err == nil {
 				hop.BestLatency = best
 			}
-			if worst, err := strconv.ParseFloat(parts[8], 64); err == nil {
+			if worst, err := strconv.ParseFloat(parts[7], 64); err == nil {
 				hop.WorstLatency = worst
 			}
-			if stdDev, err := strconv.ParseFloat(parts[9], 64); err == nil {
+			if stdDev, err := strconv.ParseFloat(parts[8], 64); err == nil {
 				hop.StdDev = stdDev
 			}
 		}
@@ -1959,7 +1940,6 @@ func parseMTRReportOutput(output string) ([]MTRHop, MTRSummary) {
 		// Calculate jitter (difference between best and worst)
 		hop.Jitter = hop.WorstLatency - hop.BestLatency
 
-		fmt.Printf("DEBUG: Successfully parsed hop: %+v\n", hop)
 		hops = append(hops, hop)
 	}
 
