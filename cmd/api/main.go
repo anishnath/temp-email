@@ -41,6 +41,7 @@ func main() {
 	r.HandleFunc("/subdomains/{domain}", api.GetSubdomains).Methods("GET")
 	r.HandleFunc("/portscan/{target}", api.GetPortScan).Methods("GET")
 	r.HandleFunc("/whois/{domain}", api.GetWhois).Methods("GET")
+	r.HandleFunc("/sslscan/{domain}", api.GetSSLScan).Methods("GET")
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("static")))
 
 	allowedOrigins := []string{

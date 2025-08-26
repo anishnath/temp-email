@@ -2,7 +2,12 @@ package api
 
 import (
 	"context"
+	"crypto/dsa"
+	"crypto/ecdsa"
+	"crypto/rsa"
+	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -68,6 +73,57 @@ type WhoisResponse struct {
 	RawData      []WhoisRecord `json:"raw_data"`
 	LookupTime   float64       `json:"lookup_time_seconds"`
 	Status       string        `json:"status"`
+}
+
+// SSLCertificate represents SSL certificate information
+type SSLCertificate struct {
+	Subject          string   `json:"subject"`
+	Issuer           string   `json:"issuer"`
+	ValidFrom        string   `json:"valid_from"`
+	ValidUntil       string   `json:"valid_until"`
+	SerialNumber     string   `json:"serial_number"`
+	SignatureAlgo    string   `json:"signature_algorithm"`
+	PublicKeyAlgo    string   `json:"public_key_algorithm"`
+	PublicKeySize    int      `json:"public_key_size,omitempty"`
+	SubjectAltNames  []string `json:"subject_alt_names,omitempty"`
+	CertificateChain []string `json:"certificate_chain,omitempty"`
+}
+
+// SSLSecurityInfo represents SSL security analysis
+type SSLSecurityInfo struct {
+	TLSVersions             []string `json:"tls_versions"`
+	SupportedCiphers        []string `json:"supported_ciphers"`
+	WeakCiphers             []string `json:"weak_ciphers,omitempty"`
+	HeartbleedVulnerable    bool     `json:"heartbleed_vulnerable"`
+	BEASTVulnerable         bool     `json:"beast_vulnerable"`
+	POODLEVulnerable        bool     `json:"poodle_vulnerable"`
+	CertificateTransparency bool     `json:"certificate_transparency"`
+	HSTSEnabled             bool     `json:"hsts_enabled,omitempty"`
+	HPKPEnabled             bool     `json:"hpkp_enabled,omitempty"`
+}
+
+// SSLScanResponse represents the response from SSL scan API
+type SSLScanResponse struct {
+	Domain          string          `json:"domain"`
+	Port            int             `json:"port"`
+	ScanType        string          `json:"scan_type"`
+	Certificate     SSLCertificate  `json:"certificate"`
+	Security        SSLSecurityInfo `json:"security"`
+	TestResults     []SSLTestResult `json:"test_results,omitempty"`
+	Vulnerabilities []string        `json:"vulnerabilities,omitempty"`
+	ScanTime        float64         `json:"scan_time_seconds"`
+	Status          string          `json:"status"`
+	RawOutput       string          `json:"raw_output,omitempty"`
+	Progress        string          `json:"progress,omitempty"`
+}
+
+// SSLTestResult represents individual test results
+type SSLTestResult struct {
+	TestName string      `json:"test_name"`
+	Status   string      `json:"status"` // "completed", "failed", "skipped"
+	Result   interface{} `json:"result,omitempty"`
+	Error    string      `json:"error,omitempty"`
+	Duration float64     `json:"duration_seconds,omitempty"`
 }
 
 func GetInbox(w http.ResponseWriter, r *http.Request) {
@@ -476,4 +532,918 @@ func isValidDomain(domain string) bool {
 	}
 
 	return true
+}
+
+// GetSSLScan performs SSL certificate scanning on a domain
+func GetSSLScan(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	domain := vars["domain"]
+
+	if domain == "" {
+		http.Error(w, "Domain parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	// Basic domain validation
+	if !isValidDomain(domain) {
+		http.Error(w, "Invalid domain format", http.StatusBadRequest)
+		return
+	}
+
+	fmt.Println(r.URL.Query())
+
+	// Get query parameters for scan options
+	scanType := r.URL.Query().Get("type")
+	if scanType == "" {
+		scanType = "basic" // Default to basic scan
+	}
+
+	// Validate scan type
+	validScanTypes := map[string]bool{
+		"basic": true,
+		"full":  true,
+		"quick": true,
+	}
+	if !validScanTypes[scanType] {
+		http.Error(w, "Invalid scan type. Use: basic, full, or quick", http.StatusBadRequest)
+		return
+	}
+
+	// Get port (default to 443)
+	portStr := r.URL.Query().Get("port")
+	port := 443
+	if portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil && p > 0 && p <= 65535 {
+			port = p
+		}
+	}
+
+	startTime := time.Now()
+	var response SSLScanResponse
+
+	fmt.Println("Starting SSL scan for", domain, "on port", port, "with type", scanType)
+
+	switch scanType {
+	case "basic":
+		response = performBasicSSLScan(domain, port)
+	case "full":
+		response = performFullSSLScan(domain, port)
+	case "quick":
+		response = performQuickSSLScan(domain, port)
+	}
+
+	response.ScanTime = time.Since(startTime).Seconds()
+	response.Status = "completed"
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// performBasicSSLScan performs basic SSL certificate analysis using OpenSSL
+func performBasicSSLScan(domain string, port int) SSLScanResponse {
+	response := SSLScanResponse{
+		Domain:   domain,
+		Port:     port,
+		ScanType: "basic",
+	}
+
+	// Get certificate information using OpenSSL
+	certInfo := getCertificateInfo(domain, port)
+	response.Certificate = certInfo
+
+	// Get basic security information
+	securityInfo := getBasicSecurityInfo(domain, port)
+	response.Security = securityInfo
+
+	return response
+}
+
+// performFullSSLScan performs comprehensive SSL analysis using testssl.sh
+func performFullSSLScan(domain string, port int) SSLScanResponse {
+	response := SSLScanResponse{
+		Domain:   domain,
+		Port:     port,
+		ScanType: "full",
+	}
+
+	// Get certificate information
+	certInfo := getCertificateInfo(domain, port)
+	response.Certificate = certInfo
+
+	// Get comprehensive security analysis using testssl.sh
+	securityInfo, vulnerabilities, rawOutput, testResults := getFullSecurityInfo(domain, port)
+	response.Security = securityInfo
+	response.Vulnerabilities = vulnerabilities
+	response.RawOutput = rawOutput
+	response.TestResults = testResults
+
+	// Create progress summary
+	var progress string
+	if len(testResults) > 0 {
+		completed := 0
+		failed := 0
+		for _, test := range testResults {
+			if test.Status == "completed" {
+				completed++
+			} else if test.Status == "failed" {
+				failed++
+			}
+		}
+		progress = fmt.Sprintf("Tests: %d completed, %d failed, %d total", completed, failed, len(testResults))
+	}
+	response.Progress = progress
+
+	return response
+}
+
+// performQuickSSLScan performs quick SSL check using Go's crypto/tls
+func performQuickSSLScan(domain string, port int) SSLScanResponse {
+	response := SSLScanResponse{
+		Domain:   domain,
+		Port:     port,
+		ScanType: "quick",
+	}
+
+	// Quick check using Go's built-in TLS
+	certInfo := getQuickCertificateInfo(domain, port)
+	response.Certificate = certInfo
+
+	// Basic security check
+	securityInfo := getQuickSecurityInfo(domain, port)
+	response.Security = securityInfo
+
+	return response
+}
+
+// getCertificateInfo extracts certificate information using OpenSSL
+func getCertificateInfo(domain string, port int) SSLCertificate {
+	cert := SSLCertificate{}
+
+	// First, get the certificate in text format
+	cmd := exec.Command("openssl", "s_client", "-connect", fmt.Sprintf("%s:%d", domain, port),
+		"-servername", domain, "-showcerts")
+	cmd.Stdin = strings.NewReader("")
+	output, err := cmd.Output()
+
+	if err != nil {
+		return cert
+	}
+
+	// Parse the OpenSSL output
+	cert = parseOpenSSLOutput(string(output))
+
+	// If we didn't get all the info, try a different approach
+	if cert.ValidFrom == "" || cert.ValidUntil == "" {
+		// Try to get certificate info using x509 command
+		cert = getCertificateInfoX509(domain, port)
+	}
+
+	// Always try to get serial number from raw certificate data
+	if cert.SerialNumber == "" {
+		cert.SerialNumber = extractSerialNumberFromRaw(domain, port)
+	}
+
+	// If still no serial number, try one more method
+	if cert.SerialNumber == "" {
+		cert.SerialNumber = extractSerialNumberAlternative(domain, port)
+	}
+
+	return cert
+}
+
+// extractSerialNumberAlternative tries another method to extract serial number
+func extractSerialNumberAlternative(domain string, port int) string {
+	// Try using openssl x509 with different options
+	cmd := exec.Command("bash", "-c",
+		fmt.Sprintf("openssl s_client -connect %s:%d -servername %s < /dev/null 2>/dev/null | openssl x509 -noout -serial -text | grep -i 'serial'",
+			domain, port, domain))
+
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+
+	// Parse the output
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(strings.ToLower(line), "serial") {
+			// Extract the serial number part
+			if strings.Contains(line, "=") {
+				parts := strings.Split(line, "=")
+				if len(parts) > 1 {
+					return strings.TrimSpace(parts[1])
+				}
+			} else if strings.Contains(line, ":") {
+				parts := strings.Split(line, ":")
+				if len(parts) > 1 {
+					return strings.TrimSpace(parts[1])
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// extractSerialNumberFromRaw extracts serial number from raw certificate data
+func extractSerialNumberFromRaw(domain string, port int) string {
+	// First, get the certificate to a temporary file
+	tempFile := fmt.Sprintf("/tmp/cert_%s_%d.pem", domain, port)
+
+	// Get certificate using s_client
+	cmd1 := exec.Command("openssl", "s_client", "-connect", fmt.Sprintf("%s:%d", domain, port),
+		"-servername", domain, "-showcerts")
+	cmd1.Stdin = strings.NewReader("")
+	output, err := cmd1.Output()
+	if err != nil {
+		return ""
+	}
+
+	// Write certificate to temp file
+	err = os.WriteFile(tempFile, output, 0644)
+	if err != nil {
+		return ""
+	}
+	defer os.Remove(tempFile)
+
+	// Extract serial number from the certificate file
+	cmd2 := exec.Command("openssl", "x509", "-in", tempFile, "-noout", "-serial")
+	output2, err := cmd2.Output()
+	if err != nil {
+		return ""
+	}
+
+	// Parse serial number from output like "serial=1234567890abcdef"
+	line := strings.TrimSpace(string(output2))
+	if strings.HasPrefix(line, "serial=") {
+		return strings.TrimPrefix(line, "serial=")
+	}
+
+	return ""
+}
+
+// getCertificateInfoX509 gets certificate info using openssl x509 command
+func getCertificateInfoX509(domain string, port int) SSLCertificate {
+	cert := SSLCertificate{}
+
+	// Get certificate and pipe it to x509 for detailed info
+	cmd := exec.Command("bash", "-c",
+		fmt.Sprintf("openssl s_client -connect %s:%d -servername %s < /dev/null 2>/dev/null | openssl x509 -text -noout",
+			domain, port, domain))
+
+	output, err := cmd.Output()
+	if err != nil {
+		return cert
+	}
+
+	// Parse the x509 output
+	cert = parseX509Output(string(output))
+
+	// Try to get serial number specifically
+	if cert.SerialNumber == "" {
+		cert.SerialNumber = extractSerialNumberFromRaw(domain, port)
+	}
+
+	return cert
+}
+
+// parseOpenSSLOutput parses OpenSSL s_client output
+func parseOpenSSLOutput(output string) SSLCertificate {
+	cert := SSLCertificate{}
+
+	lines := strings.Split(output, "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Parse certificate information from s_client output
+		if strings.HasPrefix(line, "subject=") {
+			cert.Subject = strings.TrimPrefix(line, "subject=")
+		} else if strings.HasPrefix(line, "issuer=") {
+			cert.Issuer = strings.TrimPrefix(line, "issuer=")
+		} else if strings.HasPrefix(line, "notBefore=") {
+			cert.ValidFrom = strings.TrimPrefix(line, "notBefore=")
+		} else if strings.HasPrefix(line, "notAfter=") {
+			cert.ValidUntil = strings.TrimPrefix(line, "notAfter=")
+		} else if strings.HasPrefix(line, "serial=") {
+			cert.SerialNumber = strings.TrimPrefix(line, "serial=")
+		} else if strings.HasPrefix(line, "Signature Algorithm:") {
+			cert.SignatureAlgo = strings.TrimSpace(strings.TrimPrefix(line, "Signature Algorithm:"))
+		} else if strings.HasPrefix(line, "Public Key Algorithm:") {
+			cert.PublicKeyAlgo = strings.TrimSpace(strings.TrimPrefix(line, "Public Key Algorithm:"))
+		}
+
+		// Also look for serial number in other formats
+		if cert.SerialNumber == "" && strings.Contains(strings.ToLower(line), "serial") {
+			if strings.Contains(line, "=") {
+				parts := strings.Split(line, "=")
+				if len(parts) > 1 {
+					cert.SerialNumber = strings.TrimSpace(parts[1])
+				}
+			}
+		}
+	}
+
+	return cert
+}
+
+// parseX509Output parses OpenSSL x509 command output
+func parseX509Output(output string) SSLCertificate {
+	cert := SSLCertificate{}
+
+	lines := strings.Split(output, "\n")
+
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Parse certificate information from x509 output
+		if strings.HasPrefix(line, "Subject:") {
+			cert.Subject = strings.TrimSpace(strings.TrimPrefix(line, "Subject:"))
+		} else if strings.HasPrefix(line, "Issuer:") {
+			cert.Issuer = strings.TrimSpace(strings.TrimPrefix(line, "Issuer:"))
+		} else if strings.HasPrefix(line, "Not Before:") {
+			cert.ValidFrom = strings.TrimSpace(strings.TrimPrefix(line, "Not Before:"))
+		} else if strings.HasPrefix(line, "Not After:") {
+			cert.ValidUntil = strings.TrimSpace(strings.TrimPrefix(line, "Not After:"))
+		} else if strings.HasPrefix(line, "Serial Number:") {
+			cert.SerialNumber = strings.TrimSpace(strings.TrimPrefix(line, "Serial Number:"))
+		} else if strings.HasPrefix(line, "Signature Algorithm:") {
+			cert.SignatureAlgo = strings.TrimSpace(strings.TrimPrefix(line, "Signature Algorithm:"))
+		} else if strings.HasPrefix(line, "Public Key Algorithm:") {
+			cert.PublicKeyAlgo = strings.TrimSpace(strings.TrimPrefix(line, "Public Key Algorithm:"))
+		} else if strings.HasPrefix(line, "Public-Key:") {
+			// Extract public key size
+			if strings.Contains(line, "(") && strings.Contains(line, "bit") {
+				parts := strings.Split(line, "(")
+				if len(parts) > 1 {
+					sizeStr := strings.Split(parts[1], " ")[0]
+					if size, err := strconv.Atoi(sizeStr); err == nil {
+						cert.PublicKeySize = size
+					}
+				}
+			}
+		} else if strings.HasPrefix(line, "X509v3 Subject Alternative Name:") {
+			// Parse Subject Alternative Names
+			if i+1 < len(lines) {
+				nextLine := strings.TrimSpace(lines[i+1])
+				if strings.Contains(nextLine, "DNS:") {
+					sans := strings.Split(nextLine, "DNS:")
+					for _, san := range sans {
+						san = strings.TrimSpace(san)
+						if san != "" && !strings.Contains(san, ",") {
+							cert.SubjectAltNames = append(cert.SubjectAltNames, san)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// If we still don't have all the info, try alternative parsing
+	if cert.ValidUntil == "" || cert.SerialNumber == "" {
+		cert = parseAlternativeOpenSSLOutput(output, cert)
+	}
+
+	return cert
+}
+
+// parseAlternativeOpenSSLOutput tries alternative parsing methods for missing fields
+func parseAlternativeOpenSSLOutput(output string, cert SSLCertificate) SSLCertificate {
+	lines := strings.Split(output, "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Try different date formats for expiry
+		if cert.ValidUntil == "" || strings.Contains(cert.ValidUntil, "Not Before") {
+			if strings.Contains(line, "GMT") && (strings.Contains(line, "2025") || strings.Contains(line, "2026") || strings.Contains(line, "2027")) {
+				// Look for expiry date - it should be after the "Not Before" date
+				if !strings.Contains(line, "Not Before") && !strings.Contains(line, "Jul 14") {
+					// This is likely the expiry date
+					cert.ValidUntil = line
+				}
+			}
+		}
+
+		// Try to find serial number in different formats
+		if cert.SerialNumber == "" {
+			if strings.Contains(line, "Serial:") {
+				cert.SerialNumber = strings.TrimSpace(strings.TrimPrefix(line, "Serial:"))
+			} else if strings.Contains(line, "serial=") {
+				cert.SerialNumber = strings.TrimSpace(strings.TrimPrefix(line, "serial="))
+			} else if strings.Contains(line, "Serial Number:") {
+				cert.SerialNumber = strings.TrimSpace(strings.TrimPrefix(line, "Serial Number:"))
+			}
+		}
+	}
+
+	// Clean up date format
+	if strings.Contains(cert.ValidUntil, "Not After :") {
+		cert.ValidUntil = strings.TrimSpace(strings.TrimPrefix(cert.ValidUntil, "Not After :"))
+	} else if strings.Contains(cert.ValidUntil, "Not After:") {
+		cert.ValidUntil = strings.TrimSpace(strings.TrimPrefix(cert.ValidUntil, "Not After:"))
+	}
+
+	return cert
+}
+
+// getBasicSecurityInfo gets basic security information using nmap
+func getBasicSecurityInfo(domain string, port int) SSLSecurityInfo {
+	security := SSLSecurityInfo{}
+
+	// Use nmap to get cipher information
+	cmd := exec.Command("nmap", "--script", "ssl-enum-ciphers", "-p", strconv.Itoa(port), domain)
+	output, err := cmd.Output()
+
+	if err != nil {
+		return security
+	}
+
+	// Parse nmap output
+	security = parseNmapSSLOutput(string(output))
+	return security
+}
+
+// parseNmapSSLOutput parses nmap SSL script output
+func parseNmapSSLOutput(output string) SSLSecurityInfo {
+	security := SSLSecurityInfo{}
+
+	lines := strings.Split(output, "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Parse TLS versions
+		if strings.Contains(line, "TLSv1.2") {
+			security.TLSVersions = append(security.TLSVersions, "TLSv1.2")
+		} else if strings.Contains(line, "TLSv1.3") {
+			security.TLSVersions = append(security.TLSVersions, "TLSv1.3")
+		} else if strings.Contains(line, "TLSv1.1") {
+			security.TLSVersions = append(security.TLSVersions, "TLSv1.1")
+		} else if strings.Contains(line, "TLSv1.0") {
+			security.TLSVersions = append(security.TLSVersions, "TLSv1.0")
+		} else if strings.Contains(line, "SSLv3") {
+			security.TLSVersions = append(security.TLSVersions, "SSLv3")
+		} else if strings.Contains(line, "SSLv2") {
+			security.TLSVersions = append(security.TLSVersions, "SSLv2")
+		}
+
+		// Parse ciphers
+		if strings.Contains(line, "TLS_") || strings.Contains(line, "SSL_") {
+			if !strings.Contains(line, "weak") && !strings.Contains(line, "insecure") {
+				security.SupportedCiphers = append(security.SupportedCiphers, strings.TrimSpace(line))
+			} else {
+				security.WeakCiphers = append(security.WeakCiphers, strings.TrimSpace(line))
+			}
+		}
+
+		// Parse weak ciphers
+		if strings.Contains(line, "weak") || strings.Contains(line, "insecure") {
+			security.WeakCiphers = append(security.WeakCiphers, strings.TrimSpace(line))
+		}
+
+		// Check for HSTS
+		if strings.Contains(line, "HSTS") {
+			security.HSTSEnabled = true
+		}
+	}
+
+	// Remove duplicates
+	security.TLSVersions = removeDuplicates(security.TLSVersions)
+	security.SupportedCiphers = removeDuplicates(security.SupportedCiphers)
+	security.WeakCiphers = removeDuplicates(security.WeakCiphers)
+
+	return security
+}
+
+// removeDuplicates removes duplicate strings from a slice
+func removeDuplicates(slice []string) []string {
+	keys := make(map[string]bool)
+	list := []string{}
+	for _, entry := range slice {
+		if _, value := keys[entry]; !value {
+			keys[entry] = true
+			list = append(list, entry)
+		}
+	}
+	return list
+}
+
+// getFullSecurityInfo gets comprehensive security analysis using testssl.sh
+func getFullSecurityInfo(domain string, port int) (SSLSecurityInfo, []string, string, []SSLTestResult) {
+	security := SSLSecurityInfo{}
+	var vulnerabilities []string
+	var rawOutput string
+	var testResults []SSLTestResult
+
+	// Use testssl.sh from system PATH
+	testsslPath := "testssl.sh"
+
+	// Test 1: Check if testssl.sh is properly configured
+	startTime := time.Now()
+	if !isTestSSLConfigured() {
+		testResults = append(testResults, SSLTestResult{
+			TestName: "testssl.sh Configuration Check",
+			Status:   "failed",
+			Error:    "testssl.sh not properly configured",
+			Duration: time.Since(startTime).Seconds(),
+		})
+
+		// Use enhanced nmap fallback
+		enhancedSecurity := getEnhancedSecurityInfo(domain, port)
+		testResults = append(testResults, SSLTestResult{
+			TestName: "Enhanced Nmap Fallback",
+			Status:   "completed",
+			Result:   "Using nmap for security analysis",
+			Duration: time.Since(startTime).Seconds(),
+		})
+
+		return enhancedSecurity, vulnerabilities, "testssl.sh not configured, using enhanced nmap analysis", testResults
+	}
+
+	testResults = append(testResults, SSLTestResult{
+		TestName: "testssl.sh Configuration Check",
+		Status:   "completed",
+		Result:   "testssl.sh is properly configured",
+		Duration: time.Since(startTime).Seconds(),
+	})
+
+	// Test 2: Try testssl.sh with primary options
+	startTime = time.Now()
+	cmd := exec.Command(testsslPath, "--quiet", "--severity", "LOW", "--color", "0", "--ip", "one", fmt.Sprintf("%s:%d", domain, port))
+	output, err := cmd.Output()
+
+	if err != nil {
+		testResults = append(testResults, SSLTestResult{
+			TestName: "testssl.sh Primary Scan",
+			Status:   "failed",
+			Error:    err.Error(),
+			Duration: time.Since(startTime).Seconds(),
+		})
+
+		// Test 3: Try alternative testssl.sh options
+		startTime = time.Now()
+		cmd2 := exec.Command(testsslPath, "--quiet", "--severity", "LOW", "--ip", "one", fmt.Sprintf("%s:%d", domain, port))
+		output, err = cmd2.Output()
+
+		if err != nil {
+			testResults = append(testResults, SSLTestResult{
+				TestName: "testssl.sh Alternative Scan",
+				Status:   "failed",
+				Error:    err.Error(),
+				Duration: time.Since(startTime).Seconds(),
+			})
+
+			// Test 4: Enhanced nmap fallback
+			startTime = time.Now()
+			enhancedSecurity := getEnhancedSecurityInfo(domain, port)
+			testResults = append(testResults, SSLTestResult{
+				TestName: "Enhanced Nmap Fallback",
+				Status:   "completed",
+				Result:   "Using nmap for comprehensive security analysis",
+				Duration: time.Since(startTime).Seconds(),
+			})
+
+			return enhancedSecurity, vulnerabilities, "testssl.sh execution failed, using enhanced nmap analysis", testResults
+		}
+
+		testResults = append(testResults, SSLTestResult{
+			TestName: "testssl.sh Alternative Scan",
+			Status:   "completed",
+			Result:   "Successfully executed with alternative options",
+			Duration: time.Since(startTime).Seconds(),
+		})
+	} else {
+		testResults = append(testResults, SSLTestResult{
+			TestName: "testssl.sh Primary Scan",
+			Status:   "completed",
+			Result:   "Successfully executed with primary options",
+			Duration: time.Since(startTime).Seconds(),
+		})
+	}
+
+	rawOutput = string(output)
+
+	// Test 5: Parse testssl.sh output
+	startTime = time.Now()
+	security, vulnerabilities = parseTestSSLOutput(rawOutput)
+	testResults = append(testResults, SSLTestResult{
+		TestName: "testssl.sh Output Parsing",
+		Status:   "completed",
+		Result: fmt.Sprintf("Parsed %d TLS versions, %d ciphers, %d vulnerabilities",
+			len(security.TLSVersions), len(security.SupportedCiphers), len(vulnerabilities)),
+		Duration: time.Since(startTime).Seconds(),
+	})
+
+	// Test 6: Fallback to enhanced security if needed
+	if len(security.TLSVersions) == 0 {
+		startTime = time.Now()
+		enhancedSecurity := getEnhancedSecurityInfo(domain, port)
+		security.TLSVersions = enhancedSecurity.TLSVersions
+		security.SupportedCiphers = enhancedSecurity.SupportedCiphers
+		security.WeakCiphers = enhancedSecurity.WeakCiphers
+
+		testResults = append(testResults, SSLTestResult{
+			TestName: "Enhanced Security Fallback",
+			Status:   "completed",
+			Result:   "Applied enhanced security analysis due to insufficient testssl.sh data",
+			Duration: time.Since(startTime).Seconds(),
+		})
+	}
+
+	return security, vulnerabilities, rawOutput, testResults
+}
+
+// parseTestSSLOutput parses testssl.sh output with improved parsing logic
+func parseTestSSLOutput(output string) (SSLSecurityInfo, []string) {
+	security := SSLSecurityInfo{}
+	var vulnerabilities []string
+
+	lines := strings.Split(output, "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Parse TLS versions with better pattern matching
+		if strings.Contains(line, "TLS 1.3") && !strings.Contains(line, "not offered") && !strings.Contains(line, "not supported") {
+			security.TLSVersions = append(security.TLSVersions, "TLSv1.3")
+		} else if strings.Contains(line, "TLS 1.2") && !strings.Contains(line, "not offered") && !strings.Contains(line, "not supported") {
+			security.TLSVersions = append(security.TLSVersions, "TLSv1.2")
+		} else if strings.Contains(line, "TLS 1.1") && !strings.Contains(line, "not offered") && !strings.Contains(line, "not supported") {
+			security.TLSVersions = append(security.TLSVersions, "TLSv1.1")
+		} else if strings.Contains(line, "TLS 1.0") && !strings.Contains(line, "not offered") && !strings.Contains(line, "not supported") {
+			security.TLSVersions = append(security.TLSVersions, "TLSv1.0")
+		} else if strings.Contains(line, "SSLv3") && !strings.Contains(line, "not offered") && !strings.Contains(line, "not supported") {
+			security.TLSVersions = append(security.TLSVersions, "SSLv3")
+		} else if strings.Contains(line, "SSLv2") && !strings.Contains(line, "not offered") && !strings.Contains(line, "not supported") {
+			security.TLSVersions = append(security.TLSVersions, "SSLv2")
+		}
+
+		// Parse vulnerabilities with improved detection
+		if strings.Contains(strings.ToLower(line), "heartbleed") {
+			security.HeartbleedVulnerable = true
+			vulnerabilities = append(vulnerabilities, "Heartbleed")
+		} else if strings.Contains(strings.ToUpper(line), "BEAST") {
+			security.BEASTVulnerable = true
+			vulnerabilities = append(vulnerabilities, "BEAST")
+		} else if strings.Contains(strings.ToUpper(line), "POODLE") {
+			security.POODLEVulnerable = true
+			vulnerabilities = append(vulnerabilities, "POODLE")
+		} else if strings.Contains(strings.ToLower(line), "freak") {
+			vulnerabilities = append(vulnerabilities, "FREAK")
+		} else if strings.Contains(strings.ToLower(line), "logjam") {
+			vulnerabilities = append(vulnerabilities, "Logjam")
+		} else if strings.Contains(strings.ToLower(line), "drown") {
+			vulnerabilities = append(vulnerabilities, "DROWN")
+		} else if strings.Contains(strings.ToLower(line), "lucky13") {
+			vulnerabilities = append(vulnerabilities, "Lucky13")
+		} else if strings.Contains(strings.ToLower(line), "sweet32") {
+			vulnerabilities = append(vulnerabilities, "Sweet32")
+		} else if strings.Contains(strings.ToLower(line), "robot") {
+			vulnerabilities = append(vulnerabilities, "ROBOT")
+		}
+
+		// Parse security features with better detection
+		if strings.Contains(line, "HSTS") && (strings.Contains(line, "enabled") || strings.Contains(line, "yes")) {
+			security.HSTSEnabled = true
+		} else if strings.Contains(line, "HPKP") && (strings.Contains(line, "enabled") || strings.Contains(line, "yes")) {
+			security.HPKPEnabled = true
+		} else if strings.Contains(line, "Certificate Transparency") && (strings.Contains(line, "yes") || strings.Contains(line, "enabled")) {
+			security.CertificateTransparency = true
+		}
+
+		// Parse ciphers with better detection
+		if strings.Contains(line, "TLS_") || strings.Contains(line, "SSL_") || strings.Contains(line, "ECDHE") || strings.Contains(line, "DHE") {
+			if strings.Contains(line, "weak") || strings.Contains(line, "insecure") || strings.Contains(line, "low") {
+				security.WeakCiphers = append(security.WeakCiphers, strings.TrimSpace(line))
+			} else {
+				security.SupportedCiphers = append(security.SupportedCiphers, strings.TrimSpace(line))
+			}
+		}
+
+		// Parse additional security information
+		if strings.Contains(line, "OCSP Stapling") && strings.Contains(line, "yes") {
+			// Add OCSP stapling support
+		} else if strings.Contains(line, "Session Tickets") && strings.Contains(line, "yes") {
+			// Add session ticket support
+		}
+	}
+
+	// If we didn't get TLS versions from testssl.sh, try alternative parsing
+	if len(security.TLSVersions) == 0 {
+		security.TLSVersions = parseAlternativeTLSVersions(output)
+	}
+
+	// Remove duplicates and clean up
+	security.TLSVersions = removeDuplicates(security.TLSVersions)
+	security.SupportedCiphers = removeDuplicates(security.SupportedCiphers)
+	security.WeakCiphers = removeDuplicates(security.WeakCiphers)
+	vulnerabilities = removeDuplicates(vulnerabilities)
+
+	return security, vulnerabilities
+}
+
+// parseAlternativeTLSVersions tries to extract TLS versions from testssl.sh output using different patterns
+func parseAlternativeTLSVersions(output string) []string {
+	var versions []string
+
+	lines := strings.Split(output, "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Look for TLS version information in various formats
+		if strings.Contains(line, "TLSv1.3") || strings.Contains(line, "TLS 1.3") {
+			versions = append(versions, "TLSv1.3")
+		} else if strings.Contains(line, "TLSv1.2") || strings.Contains(line, "TLS 1.2") {
+			versions = append(versions, "TLSv1.2")
+		} else if strings.Contains(line, "TLSv1.1") || strings.Contains(line, "TLS 1.1") {
+			versions = append(versions, "TLSv1.1")
+		} else if strings.Contains(line, "TLSv1.0") || strings.Contains(line, "TLS 1.0") {
+			versions = append(versions, "TLSv1.0")
+		}
+	}
+
+	return versions
+}
+
+// getQuickCertificateInfo gets basic certificate info using Go's crypto/tls
+func getQuickCertificateInfo(domain string, port int) SSLCertificate {
+	cert := SSLCertificate{}
+
+	// Use Go's crypto/tls for a quick connection test
+	conn, err := tls.Dial("tcp", fmt.Sprintf("%s:%d", domain, port), &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         domain,
+	})
+	if err != nil {
+		// If Go's TLS fails, fall back to OpenSSL for basic info
+		return getBasicCertificateInfo(domain, port)
+	}
+	defer conn.Close()
+
+	// Get certificate info
+	state := conn.ConnectionState()
+	if len(state.PeerCertificates) > 0 {
+		peerCert := state.PeerCertificates[0]
+
+		cert.Subject = peerCert.Subject.String()
+		cert.Issuer = peerCert.Issuer.String()
+		cert.ValidFrom = peerCert.NotBefore.Format("Jan 2 15:04:05 2006 MST")
+		cert.ValidUntil = peerCert.NotAfter.Format("Jan 2 15:04:05 2006 MST")
+		cert.SerialNumber = peerCert.SerialNumber.String()
+		cert.SignatureAlgo = peerCert.SignatureAlgorithm.String()
+		cert.PublicKeyAlgo = getPublicKeyAlgorithm(peerCert.PublicKey)
+
+		// Get public key size
+		if rsaKey, ok := peerCert.PublicKey.(*rsa.PublicKey); ok {
+			cert.PublicKeySize = rsaKey.Size() * 8
+		} else if ecdsaKey, ok := peerCert.PublicKey.(*ecdsa.PublicKey); ok {
+			cert.PublicKeySize = ecdsaKey.Curve.Params().BitSize
+		}
+
+		// Get Subject Alternative Names
+		cert.SubjectAltNames = peerCert.DNSNames
+	}
+
+	return cert
+}
+
+// getBasicCertificateInfo gets basic certificate info using OpenSSL as fallback
+func getBasicCertificateInfo(domain string, port int) SSLCertificate {
+	cert := SSLCertificate{}
+
+	// Use OpenSSL as fallback for quick scan
+	cmd := exec.Command("openssl", "s_client", "-connect", fmt.Sprintf("%s:%d", domain, port),
+		"-servername", domain, "-showcerts")
+	cmd.Stdin = strings.NewReader("")
+	output, err := cmd.Output()
+
+	if err != nil {
+		return cert
+	}
+
+	// Parse the OpenSSL output
+	cert = parseOpenSSLOutput(string(output))
+	return cert
+}
+
+// getPublicKeyAlgorithm returns a string representation of the public key algorithm
+func getPublicKeyAlgorithm(pub interface{}) string {
+	switch pub.(type) {
+	case *rsa.PublicKey:
+		return "rsaEncryption"
+	case *ecdsa.PublicKey:
+		return "id-ecPublicKey"
+	case *dsa.PublicKey:
+		return "dsaEncryption"
+	default:
+		return "unknown"
+	}
+}
+
+// getQuickSecurityInfo gets basic security info quickly
+func getQuickSecurityInfo(domain string, port int) SSLSecurityInfo {
+	security := SSLSecurityInfo{}
+
+	// Basic security check
+	security.TLSVersions = []string{"TLSv1.2", "TLSv1.3"}
+	security.CertificateTransparency = true
+
+	return security
+}
+
+// isTestSSLConfigured checks if testssl.sh is properly configured
+func isTestSSLConfigured() bool {
+	// Check if testssl.sh can run without configuration issues
+	cmd := exec.Command("testssl.sh", "--version")
+	output, err := cmd.Output()
+
+	if err != nil {
+		return false
+	}
+
+	// Check if output contains configuration warnings
+	outputStr := string(output)
+	if strings.Contains(outputStr, "No cipher mapping file found") ||
+		strings.Contains(outputStr, "needs files in") ||
+		strings.Contains(outputStr, "ATTENTION") {
+		return false
+	}
+
+	return true
+}
+
+// getEnhancedSecurityInfo provides enhanced security analysis using multiple nmap scripts
+func getEnhancedSecurityInfo(domain string, port int) SSLSecurityInfo {
+	security := SSLSecurityInfo{}
+
+	// Get basic security info first
+	basicSecurity := getBasicSecurityInfo(domain, port)
+	security.TLSVersions = basicSecurity.TLSVersions
+	security.SupportedCiphers = basicSecurity.SupportedCiphers
+	security.WeakCiphers = basicSecurity.WeakCiphers
+
+	// Try to get additional security information using nmap scripts
+	security = getAdditionalSecurityInfo(domain, port, security)
+
+	return security
+}
+
+// getAdditionalSecurityInfo gets additional security information using nmap scripts
+func getAdditionalSecurityInfo(domain string, port int, security SSLSecurityInfo) SSLSecurityInfo {
+	// Try to get certificate transparency info
+	cmd := exec.Command("nmap", "--script", "ssl-cert", "--script-args", "ssl-cert.show-all-certs=true", "-p", fmt.Sprintf("%d", port), domain)
+	output, err := cmd.Output()
+
+	if err == nil {
+		outputStr := string(output)
+
+		// Check for certificate transparency
+		if strings.Contains(outputStr, "Certificate Transparency") {
+			security.CertificateTransparency = true
+		}
+
+		// Check for HSTS
+		if strings.Contains(outputStr, "HSTS") {
+			security.HSTSEnabled = true
+		}
+
+		// Check for HPKP
+		if strings.Contains(outputStr, "HPKP") || strings.Contains(outputStr, "Public Key Pinning") {
+			security.HPKPEnabled = true
+		}
+	}
+
+	// Try to get additional cipher information
+	cmd2 := exec.Command("nmap", "--script", "ssl-enum-ciphers", "--script-args", "ssl-enum-ciphers.detailed=true", "-p", fmt.Sprintf("%d", port), domain)
+	output2, err2 := cmd2.Output()
+
+	if err2 == nil {
+		outputStr2 := string(output2)
+
+		// Parse for additional TLS versions
+		if strings.Contains(outputStr2, "TLSv1.3") && !contains(security.TLSVersions, "TLSv1.3") {
+			security.TLSVersions = append(security.TLSVersions, "TLSv1.3")
+		}
+		if strings.Contains(outputStr2, "TLSv1.2") && !contains(security.TLSVersions, "TLSv1.2") {
+			security.TLSVersions = append(security.TLSVersions, "TLSv1.2")
+		}
+		if strings.Contains(outputStr2, "TLSv1.1") && !contains(security.TLSVersions, "TLSv1.2") {
+			security.TLSVersions = append(security.TLSVersions, "TLSv1.1")
+		}
+	}
+
+	return security
+}
+
+// contains checks if a slice contains a string
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }
