@@ -6,10 +6,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -163,6 +167,244 @@ type DNSPropagationResponse struct {
 	Results    []DNSPropagationResult `json:"results"`
 	Consensus  bool                   `json:"consensus"`
 	UniqueSets int                    `json:"unique_answer_sets"`
+}
+
+// HTTPStatRequest represents the input to the /httpstat endpoint
+type HTTPStatRequest struct {
+	URL              string            `json:"url"`
+	Method           string            `json:"method,omitempty"`
+	Headers          map[string]string `json:"headers,omitempty"`
+	FollowRedirects  bool              `json:"follow_redirects,omitempty"`
+	TimeoutSeconds   int               `json:"timeout_seconds,omitempty"`
+	IPv4Only         bool              `json:"ipv4_only,omitempty"`
+	IPv6Only         bool              `json:"ipv6_only,omitempty"`
+	InsecureTLS      bool              `json:"insecure_tls,omitempty"`
+	ReadBody         bool              `json:"read_body,omitempty"`
+	BodyPreviewBytes int               `json:"body_preview_bytes,omitempty"`
+}
+
+// HTTPStatResponse represents the timing and metadata output
+type HTTPStatResponse struct {
+	Target      string                 `json:"target"`
+	ResolvedIP  string                 `json:"resolved_ip,omitempty"`
+	Port        int                    `json:"port,omitempty"`
+	HTTP        map[string]interface{} `json:"http"`
+	TLS         map[string]string      `json:"tls,omitempty"`
+	TimingsMS   map[string]int         `json:"timings_ms"`
+	Headers     map[string][]string    `json:"headers,omitempty"`
+	BodyPreview string                 `json:"body_preview_base64,omitempty"`
+	Redirected  bool                   `json:"redirected"`
+	Error       string                 `json:"error,omitempty"`
+}
+
+// PostHTTPStat handles POST /httpstat and returns curl-like timing breakdown
+func PostHTTPStat(w http.ResponseWriter, r *http.Request) {
+	var req HTTPStatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.URL) == "" {
+		http.Error(w, "url is required", http.StatusBadRequest)
+		return
+	}
+	if req.IPv4Only && req.IPv6Only {
+		http.Error(w, "only one of ipv4_only or ipv6_only may be true", http.StatusBadRequest)
+		return
+	}
+	if req.TimeoutSeconds <= 0 {
+		req.TimeoutSeconds = 30
+	}
+	if req.Method == "" {
+		req.Method = http.MethodGet
+	}
+
+	parsedURL, err := url.Parse(req.URL)
+	if err != nil {
+		http.Error(w, "invalid url", http.StatusBadRequest)
+		return
+	}
+
+	// Prepare request
+	httpReq, err := http.NewRequest(req.Method, parsedURL.String(), nil)
+	if err != nil {
+		http.Error(w, "failed to create request", http.StatusInternalServerError)
+		return
+	}
+	for k, v := range req.Headers {
+		if strings.EqualFold(k, "host") {
+			httpReq.Host = v
+			continue
+		}
+		httpReq.Header.Set(k, v)
+	}
+
+	var tDNSStart, tDNSDone, tConnStart, tConnDone, tGotConn, tFirstByte, tTLSStart, tTLSDone, tBodyDone time.Time
+	var resolvedAddr string
+
+	trace := &httptrace.ClientTrace{
+		DNSStart: func(_ httptrace.DNSStartInfo) { tDNSStart = time.Now() },
+		DNSDone: func(info httptrace.DNSDoneInfo) {
+			tDNSDone = time.Now()
+			if len(info.Addrs) > 0 {
+				resolvedAddr = info.Addrs[0].String()
+			}
+		},
+		ConnectStart: func(_, addr string) {
+			if tDNSDone.IsZero() {
+				tDNSStart = time.Now()
+				tDNSDone = tDNSStart
+			}
+			tConnStart = time.Now()
+		},
+		ConnectDone: func(_, addr string, err error) {
+			tConnDone = time.Now()
+			if resolvedAddr == "" {
+				resolvedAddr = addr
+			}
+		},
+		GotConn:              func(_ httptrace.GotConnInfo) { tGotConn = time.Now() },
+		GotFirstResponseByte: func() { tFirstByte = time.Now() },
+		TLSHandshakeStart:    func() { tTLSStart = time.Now() },
+		TLSHandshakeDone:     func(_ tls.ConnectionState, _ error) { tTLSDone = time.Now() },
+	}
+	httpReq = httpReq.WithContext(httptrace.WithClientTrace(r.Context(), trace))
+
+	// Transport: disable proxies by default
+	tr := &http.Transport{
+		Proxy:               nil,
+		MaxIdleConns:        100,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 15 * time.Second,
+		ForceAttemptHTTP2:   true,
+	}
+	// Dialer according to IP preference
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	if req.IPv4Only {
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp4", addr)
+		}
+	} else if req.IPv6Only {
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp6", addr)
+		}
+	}
+	if parsedURL.Scheme == "https" {
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: req.InsecureTLS}
+	}
+
+	client := &http.Client{Transport: tr, Timeout: time.Duration(req.TimeoutSeconds) * time.Second}
+	if !req.FollowRedirects {
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }
+	}
+
+	start := time.Now()
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		writeHTTPStatError(w, parsedURL.String(), err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Collect HTTP and TLS info
+	httpInfo := map[string]interface{}{
+		"protocol":       fmt.Sprintf("HTTP/%d.%d", resp.ProtoMajor, resp.ProtoMinor),
+		"status":         resp.StatusCode,
+		"content_type":   resp.Header.Get("Content-Type"),
+		"content_length": resp.ContentLength,
+	}
+	tlsInfo := map[string]string{}
+	if resp.TLS != nil {
+		switch resp.TLS.Version {
+		case tls.VersionTLS13:
+			tlsInfo["version"] = "TLS1.3"
+		case tls.VersionTLS12:
+			tlsInfo["version"] = "TLS1.2"
+		default:
+			tlsInfo["version"] = ""
+		}
+		tlsInfo["cipher_suite"] = tls.CipherSuiteName(resp.TLS.CipherSuite)
+	}
+
+	// Optionally read a small preview to establish content transfer time
+	var preview string
+	if req.ReadBody || req.BodyPreviewBytes > 0 {
+		limit := req.BodyPreviewBytes
+		if limit <= 0 {
+			limit = 0
+		}
+		var reader io.Reader = resp.Body
+		if limit > 0 {
+			reader = io.LimitReader(resp.Body, int64(limit))
+		}
+		buf, _ := io.ReadAll(reader)
+		tBodyDone = time.Now()
+		if len(buf) > 0 {
+			preview = base64.StdEncoding.EncodeToString(buf)
+		}
+	} else {
+		tBodyDone = time.Now()
+	}
+
+	// Fallbacks for zero timestamps
+	if tDNSStart.IsZero() {
+		tDNSStart = start
+		tDNSDone = start
+	}
+	if tConnStart.IsZero() {
+		tConnStart = tDNSDone
+	}
+	if tGotConn.IsZero() {
+		tGotConn = tConnDone
+	}
+	if tFirstByte.IsZero() {
+		tFirstByte = tGotConn
+	}
+
+	// compute timings
+	timings := map[string]int{
+		"dns_lookup":        int(tDNSDone.Sub(tDNSStart) / time.Millisecond),
+		"tcp_connect":       int(tConnDone.Sub(tConnStart) / time.Millisecond),
+		"tls_handshake":     int(tTLSDone.Sub(tTLSStart) / time.Millisecond),
+		"server_processing": int(tFirstByte.Sub(tGotConn) / time.Millisecond),
+		"content_transfer":  int(tBodyDone.Sub(tFirstByte) / time.Millisecond),
+		"total":             int(tBodyDone.Sub(start) / time.Millisecond),
+	}
+
+	// resolved IP and port
+	resolvedIP := ""
+	port := 0
+	if resolvedAddr != "" {
+		host, p, _ := net.SplitHostPort(resolvedAddr)
+		if host != "" {
+			resolvedIP = host
+		}
+		if pv, err := strconv.Atoi(p); err == nil {
+			port = pv
+		}
+	}
+
+	respObj := HTTPStatResponse{
+		Target:      parsedURL.String(),
+		ResolvedIP:  resolvedIP,
+		Port:        port,
+		HTTP:        httpInfo,
+		TLS:         tlsInfo,
+		TimingsMS:   timings,
+		Headers:     resp.Header,
+		BodyPreview: preview,
+		Redirected:  resp.StatusCode >= 300 && resp.StatusCode < 400,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(respObj)
+}
+
+func writeHTTPStatError(w http.ResponseWriter, target string, err error) {
+	obj := HTTPStatResponse{Target: target, Error: err.Error(), TimingsMS: map[string]int{}}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadGateway)
+	_ = json.NewEncoder(w).Encode(obj)
 }
 
 func GetInbox(w http.ResponseWriter, r *http.Request) {

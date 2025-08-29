@@ -36,17 +36,20 @@ func init() {
 
 func main() {
 	r := mux.NewRouter()
+
+	// Email-related endpoints
 	r.HandleFunc("/generate", generateEmail).Methods("GET")
 	r.HandleFunc("/inbox/{address}", api.GetInbox).Methods("GET")
+
+	// Network and security tool endpoints
 	r.HandleFunc("/subdomains/{domain}", api.GetSubdomains).Methods("GET")
 	r.HandleFunc("/portscan/{target}", api.GetPortScan).Methods("GET")
 	r.HandleFunc("/whois/{domain}", api.GetWhois).Methods("GET")
 	r.HandleFunc("/sslscan/{domain}", api.GetSSLScan).Methods("GET")
-	// Reverse DNS / PTR: supports single or comma-separated IPs
 	r.HandleFunc("/revdns/{ip}", api.GetReverseDNS).Methods("GET")
-	// DNS propagation checker
 	r.HandleFunc("/dnsprop/{name}", api.GetDNSPropagation).Methods("GET")
 	r.HandleFunc("/mtr/{target}", api.GetMTRTraceroute).Methods("GET")
+	r.HandleFunc("/httpstat", api.PostHTTPStat).Methods("POST")
 
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("static")))
 
@@ -64,9 +67,8 @@ func main() {
 
 	corsHandler := handlers.CORS(
 		handlers.AllowedOrigins(allowedOrigins),
-		handlers.AllowedMethods([]string{"GET", "OPTIONS"}),
+		handlers.AllowedMethods([]string{"GET", "POST", "OPTIONS"}),
 		handlers.AllowedHeaders([]string{"Content-Type"}),
-		handlers.AllowCredentials(),
 	)
 
 	srv := &http.Server{
