@@ -2529,7 +2529,7 @@ func takeScreenshot(req ScreenshotRequest) (ScreenshotResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(req.Timeout+10)*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "/usr/local/bin/gowitnes", args...)
+	cmd := exec.CommandContext(ctx, "gowitness", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
