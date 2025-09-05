@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/dsa"
 	"crypto/ecdsa"
@@ -16,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -2061,21 +2063,12 @@ func GetMTRTraceroute(w http.ResponseWriter, r *http.Request) {
 	// Execute command with proper error handling
 	cmd := exec.CommandContext(ctx, "mtr", args...)
 
-	// Debug: Print the command being executed
-	fmt.Printf("DEBUG: Executing MTR command: mtr %v\n", args)
-
 	startTime := time.Now()
 
 	// Execute command and capture both stdout and stderr
 	output, err := cmd.CombinedOutput()
 	endTime := time.Now()
 	duration := endTime.Sub(startTime).Seconds()
-
-	// Debug: Print the raw output and error
-	fmt.Printf("DEBUG: MTR command output:\n%s\n", string(output))
-	if err != nil {
-		fmt.Printf("DEBUG: MTR command error: %v\n", err)
-	}
 
 	if err != nil {
 		// Check if mtr is not available
@@ -2129,35 +2122,25 @@ func parseMTRJSONOutput(output string) ([]MTRHop, MTRSummary) {
 
 	if err := json.Unmarshal([]byte(output), &jsonData); err != nil {
 		// If JSON parsing fails, return empty results
-		fmt.Printf("DEBUG: JSON parsing failed: %v\n", err)
-		fmt.Printf("DEBUG: Raw output was: %s\n", output)
 		return hops, MTRSummary{}
 	}
-
-	// Debug: Print the parsed JSON data structure
-	fmt.Printf("DEBUG: JSON data structure: %+v\n", jsonData)
 
 	// Navigate through the JSON structure manually
 	report, ok := jsonData["report"].(map[string]interface{})
 	if !ok {
-		fmt.Printf("DEBUG: No 'report' key found in JSON\n")
 		return hops, MTRSummary{}
 	}
 
 	// Hubs is at the same level as mtr, not inside mtr
 	hubs, ok := report["hubs"].([]interface{})
 	if !ok {
-		fmt.Printf("DEBUG: No 'hubs' key found in report\n")
 		return hops, MTRSummary{}
 	}
-
-	fmt.Printf("DEBUG: Found %d hubs in JSON data\n", len(hubs))
 
 	// Parse each hub into a hop
 	for _, hubInterface := range hubs {
 		hub, ok := hubInterface.(map[string]interface{})
 		if !ok {
-			fmt.Printf("DEBUG: Hub is not a map: %v\n", hubInterface)
 			continue
 		}
 
@@ -2256,4 +2239,414 @@ func getSourceIP() string {
 		}
 	}
 	return "unknown"
+}
+
+// Screenshot data structures
+type ScreenshotRequest struct {
+	URL        string            `json:"url"`
+	Timeout    int               `json:"timeout_seconds,omitempty"`
+	UserAgent  string            `json:"user_agent,omitempty"`
+	Viewport   string            `json:"viewport,omitempty"`
+	FullPage   bool              `json:"full_page,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	WaitFor    int               `json:"wait_for_ms,omitempty"`
+	ChromeArgs []string          `json:"chrome_args,omitempty"`
+}
+
+type ScreenshotResult struct {
+	URL           string `json:"url"`
+	Status        int    `json:"status_code"`
+	Title         string `json:"title"`
+	Screenshot    string `json:"screenshot_base64"`
+	Error         string `json:"error,omitempty"`
+	ResponseTime  int    `json:"response_time_ms"`
+	ContentLength int    `json:"content_length"`
+	ContentType   string `json:"content_type"`
+}
+
+type ScreenshotResponse struct {
+	Success   bool             `json:"success"`
+	Result    ScreenshotResult `json:"result"`
+	Timestamp string           `json:"timestamp"`
+	Error     string           `json:"error,omitempty"`
+}
+
+type BatchScreenshotRequest struct {
+	URLs          []string          `json:"urls"`
+	Timeout       int               `json:"timeout_seconds,omitempty"`
+	UserAgent     string            `json:"user_agent,omitempty"`
+	Viewport      string            `json:"viewport,omitempty"`
+	FullPage      bool              `json:"full_page,omitempty"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	WaitFor       int               `json:"wait_for_ms,omitempty"`
+	ChromeArgs    []string          `json:"chrome_args,omitempty"`
+	MaxConcurrent int               `json:"max_concurrent,omitempty"`
+}
+
+type BatchScreenshotResponse struct {
+	Success   bool               `json:"success"`
+	Results   []ScreenshotResult `json:"results"`
+	Summary   BatchSummary       `json:"summary"`
+	Timestamp string             `json:"timestamp"`
+	Error     string             `json:"error,omitempty"`
+}
+
+type BatchSummary struct {
+	Total       int `json:"total"`
+	Successful  int `json:"successful"`
+	Failed      int `json:"failed"`
+	TotalTimeMs int `json:"total_time_ms"`
+}
+
+// PostScreenshot takes a screenshot of a single URL
+func PostScreenshot(w http.ResponseWriter, r *http.Request) {
+	var req ScreenshotRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.URL == "" {
+		http.Error(w, "URL is required", http.StatusBadRequest)
+		return
+	}
+
+	// Validate URL
+	parsedURL, err := url.Parse(req.URL)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid URL: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if parsedURL.Scheme == "" {
+		req.URL = "http://" + req.URL
+	}
+
+	// Set defaults
+	if req.Timeout == 0 {
+		req.Timeout = 30
+	}
+	if req.UserAgent == "" {
+		req.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+	}
+	if req.Viewport == "" {
+		req.Viewport = "1920x1080"
+	}
+	if req.WaitFor == 0 {
+		req.WaitFor = 1000
+	}
+
+	startTime := time.Now()
+	result, err := takeScreenshot(req)
+	responseTime := int(time.Since(startTime).Milliseconds())
+
+	if err != nil {
+		response := ScreenshotResponse{
+			Success: false,
+			Result: ScreenshotResult{
+				URL:          req.URL,
+				Status:       0,
+				Title:        "",
+				Screenshot:   "",
+				Error:        err.Error(),
+				ResponseTime: responseTime,
+			},
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Error:     err.Error(),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
+	result.ResponseTime = responseTime
+	response := ScreenshotResponse{
+		Success:   true,
+		Result:    result,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// PostBatchScreenshots takes screenshots of multiple URLs
+func PostBatchScreenshots(w http.ResponseWriter, r *http.Request) {
+	var req BatchScreenshotRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if len(req.URLs) == 0 {
+		http.Error(w, "URLs array is required", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.URLs) > 50 {
+		http.Error(w, "Maximum 50 URLs allowed per batch", http.StatusBadRequest)
+		return
+	}
+
+	// Set defaults
+	if req.Timeout == 0 {
+		req.Timeout = 30
+	}
+	if req.UserAgent == "" {
+		req.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+	}
+	if req.Viewport == "" {
+		req.Viewport = "1920x1080"
+	}
+	if req.WaitFor == 0 {
+		req.WaitFor = 1000
+	}
+	if req.MaxConcurrent == 0 {
+		req.MaxConcurrent = 5
+	}
+
+	startTime := time.Now()
+	results := make([]ScreenshotResult, len(req.URLs))
+
+	// Process URLs with concurrency limit
+	semaphore := make(chan struct{}, req.MaxConcurrent)
+	var wg sync.WaitGroup
+
+	for i, url := range req.URLs {
+		wg.Add(1)
+		go func(index int, targetURL string) {
+			defer wg.Done()
+			semaphore <- struct{}{}        // Acquire
+			defer func() { <-semaphore }() // Release
+
+			screenshotReq := ScreenshotRequest{
+				URL:        targetURL,
+				Timeout:    req.Timeout,
+				UserAgent:  req.UserAgent,
+				Viewport:   req.Viewport,
+				FullPage:   req.FullPage,
+				Headers:    req.Headers,
+				WaitFor:    req.WaitFor,
+				ChromeArgs: req.ChromeArgs,
+			}
+
+			result, err := takeScreenshot(screenshotReq)
+			if err != nil {
+				results[index] = ScreenshotResult{
+					URL:   targetURL,
+					Error: err.Error(),
+				}
+			} else {
+				results[index] = result
+			}
+		}(i, url)
+	}
+
+	wg.Wait()
+	totalTime := int(time.Since(startTime).Milliseconds())
+
+	// Calculate summary
+	successful := 0
+	failed := 0
+	for _, result := range results {
+		if result.Error == "" {
+			successful++
+		} else {
+			failed++
+		}
+	}
+
+	summary := BatchSummary{
+		Total:       len(req.URLs),
+		Successful:  successful,
+		Failed:      failed,
+		TotalTimeMs: totalTime,
+	}
+
+	response := BatchScreenshotResponse{
+		Success:   failed == 0,
+		Results:   results,
+		Summary:   summary,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if failed > 0 {
+		response.Error = fmt.Sprintf("%d out of %d screenshots failed", failed, len(req.URLs))
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// takeScreenshot executes gowitness to capture a screenshot
+func takeScreenshot(req ScreenshotRequest) (ScreenshotResult, error) {
+	// Create temporary directory for gowitness output
+	tempDir, err := os.MkdirTemp("", "gowitness-*")
+	if err != nil {
+		return ScreenshotResult{}, fmt.Errorf("failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Parse viewport dimensions
+	viewportX := "1920"
+	viewportY := "1080"
+	if req.Viewport != "" {
+		parts := strings.Split(req.Viewport, "x")
+		if len(parts) == 2 {
+			viewportX = parts[0]
+			viewportY = parts[1]
+		}
+	}
+
+	// Build gowitness command
+	args := []string{
+		"scan", "single",
+		"-u", req.URL,
+		"--screenshot-path", tempDir,
+		"--timeout", fmt.Sprintf("%d", req.Timeout),
+		"--chrome-user-agent", req.UserAgent,
+		"--chrome-window-x", viewportX,
+		"--chrome-window-y", viewportY,
+		"--delay", "1",
+		"--write-stdout",
+	}
+
+	if req.FullPage {
+		args = append(args, "--screenshot-fullpage")
+	}
+
+	// Add custom headers
+	for key, value := range req.Headers {
+		args = append(args, "--chrome-header", fmt.Sprintf("%s: %s", key, value))
+	}
+
+	// Add Chrome arguments
+	for _, arg := range req.ChromeArgs {
+		args = append(args, "--chrome-arg", arg)
+	}
+
+	// Execute gowitness
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(req.Timeout+10)*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "gowitness", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	if err != nil {
+		return ScreenshotResult{}, fmt.Errorf("gowitness execution failed: %v, stderr: %s", err, stderr.String())
+	}
+
+	// Parse gowitness output for additional info - check both stdout and stderr
+	output := stdout.String()
+	stderrOutput := stderr.String()
+
+	// Sometimes gowitness writes to stderr instead of stdout
+	if output == "" || !strings.Contains(output, "title=") {
+		output = stderrOutput
+	}
+	statusCode := 200
+	title := ""
+	contentType := ""
+
+	// Extract status code from output
+	if strings.Contains(output, "status-code=") {
+		re := regexp.MustCompile(`status-code=(\d+)`)
+		matches := re.FindStringSubmatch(output)
+		if len(matches) > 1 {
+			if code, err := strconv.Atoi(matches[1]); err == nil {
+				statusCode = code
+			}
+		}
+	}
+
+	// Extract title from output - handle both quoted and unquoted titles
+	if strings.Contains(output, "title=") {
+		// Try quoted title first: title="value"
+		re := regexp.MustCompile(`title="([^"]*)"`)
+		matches := re.FindStringSubmatch(output)
+		if len(matches) > 1 && matches[1] != "" {
+			title = matches[1]
+		} else {
+			// Try unquoted title: title=value
+			re = regexp.MustCompile(`title=([^\s]+)`)
+			matches = re.FindStringSubmatch(output)
+			if len(matches) > 1 {
+				title = matches[1]
+			}
+		}
+	}
+
+	// Extract content type from output
+	if strings.Contains(output, "content-type=") {
+		re := regexp.MustCompile(`content-type=([^\s]+)`)
+		matches := re.FindStringSubmatch(output)
+		if len(matches) > 1 {
+			contentType = matches[1]
+		}
+	}
+
+	// Check if screenshot was actually taken
+	hasScreenshot := strings.Contains(output, "have-screenshot=true")
+
+	// Find the generated screenshot file (gowitness saves as JPEG by default with URL-encoded names)
+	files, err := filepath.Glob(filepath.Join(tempDir, "*.jpg"))
+	if err != nil || len(files) == 0 {
+		// Try PNG as fallback
+		files, err = filepath.Glob(filepath.Join(tempDir, "*.png"))
+		if err != nil || len(files) == 0 {
+			// Try JPEG with different patterns
+			files, err = filepath.Glob(filepath.Join(tempDir, "*.jpeg"))
+			if err != nil || len(files) == 0 {
+				// Check if gowitness reported that no screenshot was taken
+				if !hasScreenshot {
+					return ScreenshotResult{
+						URL:           req.URL,
+						Status:        statusCode,
+						Title:         title,
+						Screenshot:    "",
+						ContentType:   contentType,
+						ContentLength: 0,
+						Error:         "Screenshot could not be taken (have-screenshot=false)",
+					}, nil
+				}
+				return ScreenshotResult{}, fmt.Errorf("no screenshot file found in %s. Files: %v", tempDir, listFilesInDir(tempDir))
+			}
+		}
+	}
+
+	screenshotFile := files[0]
+
+	// Read and encode screenshot
+	screenshotData, err := os.ReadFile(screenshotFile)
+	if err != nil {
+		return ScreenshotResult{}, fmt.Errorf("failed to read screenshot: %v", err)
+	}
+
+	screenshotBase64 := base64.StdEncoding.EncodeToString(screenshotData)
+
+	return ScreenshotResult{
+		URL:           req.URL,
+		Status:        statusCode,
+		Title:         title,
+		Screenshot:    screenshotBase64,
+		ContentType:   contentType,
+		ContentLength: len(screenshotData),
+	}, nil
+}
+
+// listFilesInDir lists all files in a directory for debugging
+func listFilesInDir(dir string) []string {
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return []string{fmt.Sprintf("error reading dir: %v", err)}
+	}
+
+	var fileNames []string
+	for _, file := range files {
+		fileNames = append(fileNames, file.Name())
+	}
+	return fileNames
 }

@@ -50,6 +50,8 @@ func main() {
 	r.HandleFunc("/dnsprop/{name}", api.GetDNSPropagation).Methods("GET")
 	r.HandleFunc("/mtr/{target}", api.GetMTRTraceroute).Methods("GET")
 	r.HandleFunc("/httpstat", api.PostHTTPStat).Methods("POST")
+	r.HandleFunc("/screenshot", api.PostScreenshot).Methods("POST")
+	r.HandleFunc("/screenshots", api.PostBatchScreenshots).Methods("POST")
 
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("static")))
 
