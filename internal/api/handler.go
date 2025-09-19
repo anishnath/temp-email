@@ -1321,7 +1321,7 @@ func getFullSecurityInfo(domain string, port int) (SSLSecurityInfo, []string, st
 	var testResults []SSLTestResult
 
 	// Use testssl.sh from system PATH
-	testsslPath := "testssl"
+	testsslPath := "/usr/bin/testssl"
 
 	// Test 1: Check if testssl.sh is properly configured
 	startTime := time.Now()
