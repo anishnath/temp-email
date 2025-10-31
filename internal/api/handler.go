@@ -1321,7 +1321,7 @@ func getFullSecurityInfo(domain string, port int) (SSLSecurityInfo, []string, st
 	var testResults []SSLTestResult
 
 	// Use testssl.sh from system PATH
-	testsslPath := "/usr/bin/testssl"
+	testsslPath := findTestSSLPath()
 
 	// Test 1: Check if testssl.sh is properly configured
 	startTime := time.Now()
@@ -1639,10 +1639,15 @@ func getQuickSecurityInfo(domain string, port int) SSLSecurityInfo {
 
 // isTestSSLConfigured checks if testssl.sh is properly configured
 func isTestSSLConfigured() bool {
-	// Check if testssl.sh can run without configuration issues
-	cmd := exec.Command("testssl.sh", "--version")
-	output, err := cmd.Output()
+	// Locate testssl executable in common locations
+	testsslPath := findTestSSLPath()
+	if testsslPath == "" {
+		return false
+	}
 
+	// Check if testssl can run without configuration issues
+	cmd := exec.Command(testsslPath, "--version")
+	output, err := cmd.Output()
 	if err != nil {
 		return false
 	}
@@ -1656,6 +1661,23 @@ func isTestSSLConfigured() bool {
 	}
 
 	return true
+}
+
+// findTestSSLPath locates the testssl executable in PATH and common locations
+func findTestSSLPath() string {
+	if p, err := exec.LookPath("testssl"); err == nil {
+		return p
+	}
+	if p, err := exec.LookPath("testssl.sh"); err == nil {
+		return p
+	}
+	if _, err := os.Stat("/usr/bin/testssl"); err == nil {
+		return "/usr/bin/testssl"
+	}
+	if _, err := os.Stat("/usr/bin/testssl.sh"); err == nil {
+		return "/usr/bin/testssl.sh"
+	}
+	return ""
 }
 
 // getEnhancedSecurityInfo provides enhanced security analysis using multiple nmap scripts
