@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"temp-email/internal/api"
+	"temp-email/internal/latex"
 
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
@@ -35,11 +36,22 @@ func init() {
 }
 
 func main() {
+	// Start LaTeX compile worker pool
+	latexCfg := latex.LoadConfig()
+	latex.StartWorkerPool(latexCfg.WorkerPoolSize)
+
 	r := mux.NewRouter()
 
 	// Email-related endpoints
 	r.HandleFunc("/generate", generateEmail).Methods("GET")
 	r.HandleFunc("/inbox/{address}", api.GetInbox).Methods("GET")
+
+	// LaTeX compilation API (served from main process)
+	r.HandleFunc("/api/latex/compile", api.GetLaTeXCompile).Methods("POST")
+	r.HandleFunc("/api/latex/upload", api.GetLaTeXUpload).Methods("POST")
+	r.HandleFunc("/api/latex/jobs/{jobId}/status", api.GetLaTeXJobStatus).Methods("GET")
+	r.HandleFunc("/api/latex/jobs/{jobId}/pdf", api.GetLaTeXJobPDF).Methods("GET")
+	r.HandleFunc("/api/latex/jobs/{jobId}/logs", api.GetLaTeXJobLogs).Methods("GET")
 
 	// Network and security tool endpoints
 	r.HandleFunc("/subdomains/{domain}", api.GetSubdomains).Methods("GET")

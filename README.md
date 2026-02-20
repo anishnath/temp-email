@@ -75,6 +75,25 @@ SERVER_PORT=8080
 ### Server Configuration
 The server will start on the port specified by `SERVER_PORT` environment variable. If not set, it defaults to port 8080.
 
+### LaTeX API (Optional)
+
+The LaTeX compilation API is served from the main process. Requires `pdflatex` (TeX Live) to be installed.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LATEX_TEMP_DIR` | Temp directory for LaTeX jobs | /tmp/latex-jobs |
+| `LATEX_TIMEOUT_SECONDS` | Compile timeout | 30 |
+| `LATEX_WORKER_POOL_SIZE` | Worker goroutines | 4 |
+| `LATEX_CLEANUP_AFTER_MINUTES` | Cleanup delay after job | 60 |
+| `LATEX_MAX_SOURCE_SIZE_KB` | Max source size | 512 |
+
+**Endpoints:**
+- `POST /api/latex/compile` — Submit LaTeX source, get `jobId`
+- `GET /api/latex/jobs/{jobId}/status` — Job status
+- `GET /api/latex/jobs/{jobId}/logs` — SSE stream of compile logs
+- `GET /api/latex/jobs/{jobId}/pdf` — Download PDF when done
+- `POST /api/latex/upload` — Upload image for LaTeX documents
+
 ## API Endpoints
 
 ### Generate Temporary Email
@@ -518,6 +537,34 @@ smtp_tls_session_cache_database = btree:${data_directory}/smtp_scache
 smtpd_relay_restrictions = permit_mynetworks permit_sasl_authenticated defer_unauth_destination
 myhostname = ip-10-100-23-50.ec2.internal
 alias_maps = hash:/etc/aliases
+
+## PDF Password Utilities
+
+These endpoints rely on the `qpdf` CLI being installed and available in `PATH`.
+
+- POST `/pdf/password/add`
+  - Form fields: `file` (PDF), `password` (required), `owner_password` (optional; defaults to `password`), `key_length` (optional: 40, 128, 256; defaults to 256)
+  - Returns: `application/pdf` (encrypted PDF)
+
+- POST `/pdf/password/remove`
+  - Form fields: `file` (encrypted PDF), `password` (required)
+  - Returns: `application/pdf` (decrypted PDF)
+
+Example (encrypt):
+```bash
+curl -X POST http://localhost:8080/pdf/password/add \
+  -F "file=@/path/to/input.pdf" \
+  -F "password=mysecret" \
+  -o encrypted.pdf
+```
+
+Example (decrypt):
+```bash
+curl -X POST http://localhost:8080/pdf/password/remove \
+  -F "file=@encrypted.pdf" \
+  -F "password=mysecret" \
+  -o decrypted.pdf
+```
 alias_database = hash:/etc/aliases
 myorigin = /etc/mailname
 mydestination = $myhostname, goodbanners.xyz, ip-10-100-23-50.ec2.internal, localhost.ec2.internal, localhost
