@@ -306,10 +306,25 @@ func CompileTikZ(j *job.CompileJob) {
 	}
 }
 
+// texDistDefaults are fallback TEXMFDIST paths when env is unset (Linux vs macOS).
+var texDistDefaults = []string{
+	"/usr/share/texlive/texmf-dist",           // Debian/Ubuntu
+	"/usr/local/texlive/2025basic/texmf-dist", // macOS TeX Live
+	"/usr/local/texlive/2024/texmf-dist",
+}
+
 func setDvisvgmEnv(cmd *exec.Cmd) {
 	texDist := os.Getenv("TEXMFDIST")
 	if texDist == "" {
-		texDist = "/usr/local/texlive/2025basic/texmf-dist"
+		for _, p := range texDistDefaults {
+			if _, err := os.Stat(p); err == nil {
+				texDist = p
+				break
+			}
+		}
+		if texDist == "" {
+			texDist = texDistDefaults[0] // use Linux path as last resort
+		}
 	}
 	texCnf := os.Getenv("TEXMFCNF")
 	if texCnf == "" {
