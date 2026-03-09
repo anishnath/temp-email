@@ -86,6 +86,14 @@ func ParseRaw(raw string) (*ParsedRaw, error) {
 	tikzMatch := reTikzpictureBlock.FindStringSubmatch(raw)
 	if len(tikzMatch) >= 2 {
 		tikzBlock := strings.TrimSpace(tikzMatch[1])
+		// Include any preamble (e.g. \tikzset{...}) that appears before \begin{tikzpicture}
+		stripped := reStripPreamble.ReplaceAllString(raw, "")
+		if idx := strings.Index(stripped, "\\begin{tikzpicture}"); idx > 0 {
+			prefix := strings.TrimSpace(stripped[:idx])
+			if prefix != "" {
+				tikzBlock = prefix + "\n\n" + tikzBlock
+			}
+		}
 		return &ParsedRaw{TikzBlock: tikzBlock, Packages: packages, TikzLibraries: libs, GDLibraries: gdLibs}, nil
 	}
 
