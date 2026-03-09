@@ -1,0 +1,20 @@
+\documentclass[dvisvgm]{minimal}
+\usepackage{tikz}
+\usetikzlibrary{trees,arrows.meta}
+
+\begin{document}
+\begin{tikzpicture}[
+  level distance=1.2cm,
+  every node/.style={fill=blue!20,circle,draw},
+  edge from parent/.style={draw,-{Stealth[length=2mm]}}
+]
+  \node {Root}
+    child { node {A}
+      child { node {A1} }
+      child { node {A2} }
+    }
+    child { node {B}
+      child { node {B1} }
+    };
+\end{tikzpicture}
+\end{document}

@@ -1,0 +1,11 @@
+\documentclass[dvisvgm]{minimal}
+\usepackage{tikz}
+\usepackage{amsmath}
+
+\begin{document}
+\begin{tikzpicture}
+  \node at (0,0) {$f(x) = \int_0^x e^{-t^2} \, dt$};
+  \draw[<->] (-2,0) -- (2,0) node[right] {$x$};
+  \draw[<->] (0,-1) -- (0,1) node[above] {$y$};
+\end{tikzpicture}
+\end{document}

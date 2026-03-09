@@ -1,0 +1,14 @@
+\documentclass[dvisvgm]{minimal}
+\usepackage{tikz}
+\usetikzlibrary{arrows,arrows.meta,positioning}
+
+\begin{document}
+\begin{tikzpicture}[node distance=1.5cm]
+  \node[draw,circle] (a) {A};
+  \node[draw,circle,right=of a] (b) {B};
+  \node[draw,circle,below=of a] (c) {C};
+  \draw[->] (a) -- (b);
+  \draw[->] (a) -- (c);
+  \draw[->] (c) -- (b);
+\end{tikzpicture}
+\end{document}
