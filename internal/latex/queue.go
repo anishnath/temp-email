@@ -19,6 +19,10 @@ func StartWorkerPool(n int) {
 func worker(jobs <-chan *job.CompileJob) {
 	for j := range jobs {
 		j.SetStatus(job.StatusCompiling)
-		compiler.Compile(j)
+		if j.Tikz != "" || j.TikzBlock != "" {
+			compiler.CompileTikZ(j)
+		} else {
+			compiler.Compile(j)
+		}
 	}
 }

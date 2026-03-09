@@ -17,18 +17,24 @@ const (
 	StatusError     Status = "error"
 )
 
-// CompileJob holds all state for a LaTeX compilation.
+// CompileJob holds all state for a LaTeX or TikZ compilation.
 type CompileJob struct {
-	ID        string
-	Status    Status
-	Source    string
-	WorkDir   string
-	PDFPath   string
-	LogLines  chan string   // streaming log lines
-	Done      chan struct{} // closed when job finishes
-	Error     string
-	CreatedAt time.Time
-	FileIDs   []string // upload fileIds to copy into job dir before compile
+	ID            string
+	Status        Status
+	Source        string // LaTeX full document
+	Tikz          string // TikZ snippet (when set, use TikZ pipeline)
+	WorkDir       string
+	PDFPath       string        // set for LaTeX jobs
+	SVGPath       string        // set for TikZ jobs
+	LogLines      chan string   // streaming log lines
+	Done          chan struct{} // closed when job finishes
+	Error         string
+	CreatedAt     time.Time
+	FileIDs       []string // upload fileIds to copy into job dir before compile
+	Packages      []string // extra \usepackage{} (TikZ jobs)
+	TikzLibraries []string // extra \usetikzlibrary{} (TikZ jobs)
+	GDLibraries   []string // \usegdlibrary{} for graph drawing (TikZ jobs)
+	TikzBlock     string   // full \begin{tikzpicture}[opts]...\end{tikzpicture} (when from raw paste)
 
 	mu sync.RWMutex
 }
@@ -84,6 +90,55 @@ func (j *CompileJob) SetDoneWithWarning(pdfPath, warning string) {
 	j.PDFPath = pdfPath
 	j.Status = StatusDone
 	j.Error = warning
+}
+
+// SetDoneSVG sets SVG path and status to done (for TikZ jobs).
+func (j *CompileJob) SetDoneSVG(svgPath string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.SVGPath = svgPath
+	j.Status = StatusDone
+}
+
+// SetDoneSVGWithWarning sets SVG path and status to done but records a warning (e.g. latex exited non-zero but SVG was produced).
+func (j *CompileJob) SetDoneSVGWithWarning(svgPath, warning string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.SVGPath = svgPath
+	j.Status = StatusDone
+	j.Error = warning
+}
+
+// NewTikzJob creates a new TikZ compile job.
+// Use Tikz for inner content only, or TikzBlock for full \begin{tikzpicture}...\end{tikzpicture} block.
+func NewTikzJob(tikz string, fileIDs []string, packages []string, tikzLibraries []string) *CompileJob {
+	return &CompileJob{
+		ID:            uuid.New().String(),
+		Status:        StatusPending,
+		Tikz:          tikz,
+		FileIDs:       fileIDs,
+		Packages:      packages,
+		TikzLibraries: tikzLibraries,
+		LogLines:      make(chan string, 256),
+		Done:          make(chan struct{}),
+		CreatedAt:     time.Now(),
+	}
+}
+
+// NewTikzJobFromRaw creates a TikZ job from a parsed raw block.
+func NewTikzJobFromRaw(tikzBlock string, fileIDs []string, packages []string, tikzLibraries []string, gdLibraries []string) *CompileJob {
+	return &CompileJob{
+		ID:            uuid.New().String(),
+		Status:        StatusPending,
+		TikzBlock:     tikzBlock,
+		FileIDs:       fileIDs,
+		Packages:      packages,
+		TikzLibraries: tikzLibraries,
+		GDLibraries:   gdLibraries,
+		LogLines:      make(chan string, 256),
+		Done:          make(chan struct{}),
+		CreatedAt:     time.Now(),
+	}
 }
 
 // Registry for concurrent access.

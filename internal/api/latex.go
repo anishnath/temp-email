@@ -22,6 +22,18 @@ import (
 
 // LaTeX API handlers - served from main process.
 
+func dedupeStrings(ss []string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, s := range ss {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func latexError(w http.ResponseWriter, errMsg, code string, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -37,6 +49,16 @@ type LaTeXCompileRequest struct {
 	FileIDs []string `json:"fileIds,omitempty"` // fileIds from upload API to include in job dir
 }
 
+// TikzCompileRequest is the JSON body for POST /api/latex/tikz/compile.
+type TikzCompileRequest struct {
+	Tikz          string   `json:"tikz,omitempty"` // inner tikzpicture content only
+	Raw           string   `json:"raw,omitempty"`  // full paste from docs: \usetikzlibrary{...}\begin{tikzpicture}...\end{tikzpicture}
+	FileIDs       []string `json:"fileIds,omitempty"`
+	Border        string   `json:"border,omitempty"`        // reserved
+	Packages      []string `json:"packages,omitempty"`      // extra \usepackage{pkg} (ignored when raw is used)
+	TikzLibraries []string `json:"tikzLibraries,omitempty"` // extra \usetikzlibrary{lib} (merged when raw is used)
+}
+
 // LaTeXCompileResponse is the immediate response with jobId.
 type LaTeXCompileResponse struct {
 	JobID string `json:"jobId"`
@@ -47,6 +69,7 @@ type LaTeXStatusResponse struct {
 	JobID   string `json:"jobId"`
 	Status  string `json:"status"`
 	Warning string `json:"warning,omitempty"` // set when done but there were warnings (e.g. missing image)
+	Error   string `json:"error,omitempty"`   // set when status=error, explains why compilation failed
 }
 
 // LaTeXUploadResponse is returned after successful upload.
@@ -99,6 +122,92 @@ func GetLaTeXCompile(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(LaTeXCompileResponse{JobID: j.ID})
 }
 
+// PostTikzCompile handles POST /api/latex/tikz/compile
+func PostTikzCompile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		latexError(w, "method not allowed", "METHOD_NOT_ALLOWED", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		latexError(w, "failed to read body", "BAD_REQUEST", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	var req TikzCompileRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		latexError(w, "invalid JSON", "BAD_REQUEST", http.StatusBadRequest)
+		return
+	}
+	req.Tikz = strings.TrimSpace(req.Tikz)
+	req.Raw = strings.TrimSpace(req.Raw)
+
+	if req.Raw == "" && req.Tikz == "" {
+		latexError(w, "tikz or raw is required", "BAD_REQUEST", http.StatusBadRequest)
+		return
+	}
+	if req.Raw != "" && req.Tikz != "" {
+		latexError(w, "provide either tikz or raw, not both", "BAD_REQUEST", http.StatusBadRequest)
+		return
+	}
+
+	cfg := latex.LoadConfig()
+	sourceLen := int64(len(req.Tikz))
+	if req.Raw != "" {
+		sourceLen = int64(len(req.Raw))
+	}
+	if sourceLen > cfg.MaxSourceSizeBytes {
+		latexError(w, "source too large", "SOURCE_TOO_LARGE", http.StatusBadRequest)
+		return
+	}
+
+	var j *job.CompileJob
+	if req.Raw != "" {
+		parsed, err := compiler.ParseRaw(req.Raw)
+		if err != nil {
+			latexError(w, err.Error(), "BAD_REQUEST", http.StatusBadRequest)
+			return
+		}
+		// Merge parsed libs with any explicit tikzLibraries from request
+		libs := append(parsed.TikzLibraries, req.TikzLibraries...)
+		libs = dedupeStrings(libs)
+		pkgs := append(parsed.Packages, req.Packages...)
+		pkgs = dedupeStrings(pkgs)
+		if err := compiler.ValidatePackageNames(pkgs, libs); err != nil {
+			latexError(w, err.Error(), "BAD_REQUEST", http.StatusBadRequest)
+			return
+		}
+		if err := compiler.ValidateGDLibraryNames(parsed.GDLibraries); err != nil {
+			latexError(w, err.Error(), "BAD_REQUEST", http.StatusBadRequest)
+			return
+		}
+		fullSource := "\\documentclass[dvisvgm]{minimal}\\usepackage{tikz}" + parsed.TikzBlock
+		if err := compiler.Check(fullSource); err != nil {
+			latexError(w, err.Error(), "SANITIZER_REJECTED", http.StatusBadRequest)
+			return
+		}
+		j = job.NewTikzJobFromRaw(parsed.TikzBlock, req.FileIDs, pkgs, libs, parsed.GDLibraries)
+	} else {
+		if err := compiler.ValidatePackageNames(req.Packages, req.TikzLibraries); err != nil {
+			latexError(w, err.Error(), "BAD_REQUEST", http.StatusBadRequest)
+			return
+		}
+		fullSource := "\\documentclass[dvisvgm]{minimal}\\usepackage{tikz}" + req.Tikz
+		if err := compiler.Check(fullSource); err != nil {
+			latexError(w, err.Error(), "SANITIZER_REJECTED", http.StatusBadRequest)
+			return
+		}
+		j = job.NewTikzJob(req.Tikz, req.FileIDs, req.Packages, req.TikzLibraries)
+	}
+	job.RegisterJob(j)
+	latex.JobQueue <- j
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(LaTeXCompileResponse{JobID: j.ID})
+}
+
 // GetLaTeXJobStatus handles GET /api/latex/jobs/{jobId}/status
 func GetLaTeXJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := mux.Vars(r)["jobId"]
@@ -114,6 +223,9 @@ func GetLaTeXJobStatus(w http.ResponseWriter, r *http.Request) {
 	resp := LaTeXStatusResponse{JobID: j.ID, Status: string(j.GetStatus())}
 	if j.GetStatus() == job.StatusDone && j.Error != "" {
 		resp.Warning = j.Error
+	}
+	if j.GetStatus() == job.StatusError && j.Error != "" {
+		resp.Error = j.Error
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
@@ -148,6 +260,37 @@ func GetLaTeXJobPDF(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", `inline; filename="document.pdf"`)
 	http.ServeContent(w, r, "document.pdf", j.CreatedAt, f)
+}
+
+// GetLaTeXJobSVG handles GET /api/latex/jobs/{jobId}/svg (TikZ jobs only)
+func GetLaTeXJobSVG(w http.ResponseWriter, r *http.Request) {
+	jobID := mux.Vars(r)["jobId"]
+	if jobID == "" {
+		latexError(w, "job not found", "JOB_NOT_FOUND", http.StatusNotFound)
+		return
+	}
+	j, ok := job.GetJob(jobID)
+	if !ok {
+		latexError(w, "job not found", "JOB_NOT_FOUND", http.StatusNotFound)
+		return
+	}
+	if j.GetStatus() != job.StatusDone {
+		latexError(w, "SVG not ready", "SVG_NOT_READY", http.StatusNotFound)
+		return
+	}
+	if j.SVGPath == "" {
+		latexError(w, "SVG not found", "SVG_NOT_READY", http.StatusNotFound)
+		return
+	}
+	f, err := os.Open(j.SVGPath)
+	if err != nil {
+		latexError(w, "failed to read SVG", "INTERNAL_ERROR", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Content-Disposition", `inline; filename="document.svg"`)
+	http.ServeContent(w, r, "document.svg", j.CreatedAt, f)
 }
 
 // GetLaTeXJobLogs handles GET /api/latex/jobs/{jobId}/logs (SSE)
@@ -192,7 +335,12 @@ func GetLaTeXJobLogs(w http.ResponseWriter, r *http.Request) {
 				status := j.GetStatus()
 				switch status {
 				case job.StatusDone:
-					evt := map[string]string{"status": "done", "pdfUrl": "/api/latex/jobs/" + jobID + "/pdf"}
+					evt := map[string]string{"status": "done"}
+					if j.SVGPath != "" {
+						evt["svgUrl"] = "/api/latex/jobs/" + jobID + "/svg"
+					} else {
+						evt["pdfUrl"] = "/api/latex/jobs/" + jobID + "/pdf"
+					}
 					if j.Error != "" {
 						evt["warning"] = j.Error
 					}

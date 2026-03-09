@@ -48,9 +48,11 @@ func main() {
 
 	// LaTeX compilation API (served from main process)
 	r.HandleFunc("/api/latex/compile", api.GetLaTeXCompile).Methods("POST")
+	r.HandleFunc("/api/latex/tikz/compile", api.PostTikzCompile).Methods("POST")
 	r.HandleFunc("/api/latex/upload", api.GetLaTeXUpload).Methods("POST")
 	r.HandleFunc("/api/latex/jobs/{jobId}/status", api.GetLaTeXJobStatus).Methods("GET")
 	r.HandleFunc("/api/latex/jobs/{jobId}/pdf", api.GetLaTeXJobPDF).Methods("GET")
+	r.HandleFunc("/api/latex/jobs/{jobId}/svg", api.GetLaTeXJobSVG).Methods("GET")
 	r.HandleFunc("/api/latex/jobs/{jobId}/logs", api.GetLaTeXJobLogs).Methods("GET")
 
 	// Network and security tool endpoints
