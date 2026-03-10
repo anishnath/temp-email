@@ -1,0 +1,15 @@
+# Cloudflare Pastebin infrastructure
+# Used for D1 database and migrations. R2 is created via wrangler r2 bucket create.
+#
+# To create D1: wrangler d1 create pastebin-db
+# Then set database_id below (from wrangler output).
+
+name = "pastebin-infra"
+main = ""  # No worker; config only for D1
+compatibility_date = "2024-01-01"
+
+# D1 database binding - populate database_id after: wrangler d1 create pastebin-db
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "pastebin-db"
+# database_id = "8b9264a4-3ec4-492b-a2d8-637a9c6ecfed"
