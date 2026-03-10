@@ -40,6 +40,12 @@ func main() {
 	latexCfg := latex.LoadConfig()
 	latex.StartWorkerPool(latexCfg.WorkerPoolSize)
 
+	// Init Pastebin (optional; skips if R2 not configured)
+	if err := api.InitPastebin(); err != nil {
+		log.Printf("Pastebin init skipped: %v", err)
+	}
+	api.StartPastebinCleanup()
+
 	r := mux.NewRouter()
 
 	// Email-related endpoints
@@ -67,6 +73,19 @@ func main() {
 	r.HandleFunc("/screenshot", api.PostScreenshot).Methods("POST")
 	r.HandleFunc("/screenshots", api.PostBatchScreenshots).Methods("POST")
 
+	// Pastebin API
+	r.HandleFunc("/api/pastebin", api.PostPastebin).Methods("POST")
+	r.HandleFunc("/api/pastebin/keys", api.PostPastebinKeys).Methods("POST")
+	r.HandleFunc("/api/pastebin/health", api.GetPastebinHealth).Methods("GET")
+	r.HandleFunc("/api/pastebin/stats", api.GetPastebinStats).Methods("GET")
+	r.HandleFunc("/api/pastebin/recent", api.GetPastebinRecent).Methods("GET")
+	r.HandleFunc("/api/pastebin/mine", api.GetPastebinMine).Methods("GET")
+	// {id} uses regex so "health", "stats", "keys", "mine" don't match
+	// {id} requires 8+ chars (excludes health, stats, keys, mine)
+	r.HandleFunc(`/api/pastebin/{id:[a-z0-9][a-z0-9_-]{7,}}/raw`, api.GetPastebinRaw).Methods("GET")
+	r.HandleFunc(`/api/pastebin/{id:[a-z0-9][a-z0-9_-]{7,}}`, api.GetPastebin).Methods("GET")
+	r.HandleFunc(`/api/pastebin/{id:[a-z0-9][a-z0-9_-]{7,}}`, api.DeletePastebin).Methods("DELETE")
+
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("static")))
 
 	allowedOrigins := []string{
@@ -83,8 +102,8 @@ func main() {
 
 	corsHandler := handlers.CORS(
 		handlers.AllowedOrigins(allowedOrigins),
-		handlers.AllowedMethods([]string{"GET", "POST", "OPTIONS"}),
-		handlers.AllowedHeaders([]string{"Content-Type"}),
+		handlers.AllowedMethods([]string{"GET", "POST", "DELETE", "OPTIONS"}),
+		handlers.AllowedHeaders([]string{"Content-Type", "X-API-Key", "X-Delete-Token"}),
 	)
 
 	srv := &http.Server{
