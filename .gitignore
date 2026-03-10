@@ -1,0 +1,28 @@
+# Binaries
+bin/
+*.exe
+*.out
+
+# Go build/test artifacts
+*.test
+*.prof
+coverage.out
+
+# Environment files
+.env
+config/.env
+
+# Local databases and logs
+*.db
+*.log
+
+# IDE/editor files
+.idea/
+.vscode/
+*.iml
+
+# TikZ test generated artifacts
+tikz-test/*.aux
+tikz-test/*.dvi
+tikz-test/*.log
+tikz-test/*.svg
