@@ -61,6 +61,26 @@ func main() {
 	r.HandleFunc("/api/latex/jobs/{jobId}/svg", api.GetLaTeXJobSVG).Methods("GET")
 	r.HandleFunc("/api/latex/jobs/{jobId}/logs", api.GetLaTeXJobLogs).Methods("GET")
 
+	// Arduino CLI compile (temp sketch dir, cleaned after compile + delayed cleanup)
+	r.HandleFunc("/api/arduino-compile", api.PostArduinoCompile).Methods("POST")
+	r.HandleFunc("/api/arduino-libraries", api.GetArduinoLibrariesOverview).Methods("GET")
+	r.HandleFunc("/api/arduino-libraries/installed", api.GetArduinoLibrariesInstalled).Methods("GET")
+	r.HandleFunc("/api/arduino-libraries/search", api.GetArduinoLibrariesSearch).Methods("GET")
+	r.HandleFunc("/api/arduino-libraries/install", api.PostArduinoLibraryInstall).Methods("POST")
+
+	// Arduino QEMU simulation (ESP32 boards — SSE streaming)
+	r.HandleFunc("/api/arduino-simulate/start", api.PostArduinoSimulateStart).Methods("POST")
+	r.HandleFunc("/api/arduino-simulate/stop", api.PostArduinoSimulateStop).Methods("POST")
+	r.HandleFunc("/api/arduino-simulate/input", api.PostArduinoSimulateInput).Methods("POST")
+	r.HandleFunc("/api/arduino-simulate/stream", api.GetArduinoSimulateStream).Methods("GET")
+
+	// Raspberry Pi 3 QEMU simulation (SSE streaming)
+	r.HandleFunc("/api/pi-simulate/start", api.PostPiSimulateStart).Methods("POST")
+	r.HandleFunc("/api/pi-simulate/stop", api.PostPiSimulateStop).Methods("POST")
+	r.HandleFunc("/api/pi-simulate/input", api.PostPiSimulateInput).Methods("POST")
+	r.HandleFunc("/api/pi-simulate/gpio", api.PostPiSimulateGPIO).Methods("POST")
+	r.HandleFunc("/api/pi-simulate/stream", api.GetPiSimulateStream).Methods("GET")
+
 	// Network and security tool endpoints
 	r.HandleFunc("/subdomains/{domain}", api.GetSubdomains).Methods("GET")
 	r.HandleFunc("/portscan/{target}", api.GetPortScan).Methods("GET")
@@ -106,9 +126,12 @@ func main() {
 		handlers.AllowedHeaders([]string{"Content-Type", "X-API-Key", "X-Delete-Token"}),
 	)
 
+	// Gzip responses when Accept-Encoding includes gzip (gorilla CompressHandler).
+	// Many clients decode automatically (browsers, curl --compressed). For manual
+	// gunzip: send Accept-Encoding: gzip, read raw body bytes, inflate with zlib/gzip.
 	srv := &http.Server{
 		Addr:    ":" + serverPort,
-		Handler: corsHandler(r),
+		Handler: corsHandler(handlers.CompressHandler(r)),
 	}
 	log.Println("Starting server on :" + serverPort)
 	log.Fatal(srv.ListenAndServe())
