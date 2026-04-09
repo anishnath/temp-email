@@ -93,6 +93,15 @@ func main() {
 	r.HandleFunc("/screenshot", api.PostScreenshot).Methods("POST")
 	r.HandleFunc("/screenshots", api.PostBatchScreenshots).Methods("POST")
 
+	// SEO site audit (SQLite; SEOnaut-compatible crawlers and issue rules)
+	r.HandleFunc("/api/seo/crawls", api.GetSEOCrawlList).Methods("GET")
+	r.HandleFunc("/api/seo/crawl", api.PostSEOStartCrawl).Methods("POST")
+	r.HandleFunc("/api/seo/crawl/{id}/cancel", api.PostSEOCancelCrawl).Methods("POST")
+	r.HandleFunc("/api/seo/crawl/{id}/findings", api.GetSEOFindings).Methods("GET")
+	r.HandleFunc("/api/seo/crawl/{id}/issues/pages", api.GetSEOPagesForIssue).Methods("GET")
+	r.HandleFunc("/api/seo/crawl/{id}/page/{page_id}", api.GetSEOPageDetail).Methods("GET")
+	r.HandleFunc("/api/seo/crawl/{id}", api.GetSEOStatus).Methods("GET")
+
 	// Pastebin API
 	r.HandleFunc("/api/pastebin", api.PostPastebin).Methods("POST")
 	r.HandleFunc("/api/pastebin/keys", api.PostPastebinKeys).Methods("POST")
