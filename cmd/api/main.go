@@ -93,6 +93,11 @@ func main() {
 	r.HandleFunc("/screenshot", api.PostScreenshot).Methods("POST")
 	r.HandleFunc("/screenshots", api.PostBatchScreenshots).Methods("POST")
 
+	// Lighthouse single-page audit (runs local lighthouse CLI, results stored in SQLite)
+	r.HandleFunc("/api/lighthouse", api.PostLighthouse).Methods("POST")
+	r.HandleFunc("/api/lighthouse/audits", api.GetLighthouseAudits).Methods("GET")
+	r.HandleFunc("/api/lighthouse/audits/{id}", api.GetLighthouseAuditByID).Methods("GET")
+
 	// SEO site audit (SQLite; SEOnaut-compatible crawlers and issue rules)
 	r.HandleFunc("/api/seo/crawls", api.GetSEOCrawlList).Methods("GET")
 	r.HandleFunc("/api/seo/crawl", api.PostSEOStartCrawl).Methods("POST")
