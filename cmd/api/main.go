@@ -99,6 +99,9 @@ func main() {
 	r.HandleFunc("/api/lighthouse/audits", api.GetLighthouseAudits).Methods("GET")
 	r.HandleFunc("/api/lighthouse/audits/{id}", api.GetLighthouseAuditByID).Methods("GET")
 
+	// Structured data extraction (JSON-LD, Microdata, RDFa, meta tags)
+	r.HandleFunc("/api/structured-data/extract", api.PostStructuredDataExtract).Methods("POST")
+
 	// SEO site audit (SQLite; SEOnaut-compatible crawlers and issue rules)
 	r.HandleFunc("/api/seo/crawls", api.GetSEOCrawlList).Methods("GET")
 	r.HandleFunc("/api/seo/crawl", api.PostSEOStartCrawl).Methods("POST")
