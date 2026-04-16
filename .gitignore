@@ -26,3 +26,5 @@ tikz-test/*.aux
 tikz-test/*.dvi
 tikz-test/*.log
 tikz-test/*.svg
+/config/.env.prod
+/data/

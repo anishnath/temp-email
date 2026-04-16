@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -108,24 +109,31 @@ const minimalLHR = `{
   }
 }`
 
-// setupLhTest creates an isolated in-memory SQLite DB for the test, injects a
-// fake lighthouse binary (a shell script echoing minimalLHR), and resets both
-// after the test.
+// setupLhTest creates an isolated SQLite DB for the test, injects a fake
+// lighthouse binary, and resets all shared global state.
 func setupLhTest(t *testing.T) func() {
 	t.Helper()
 
-	// Reset shared state
+	// Reset DB state
 	lhDBMu.Lock()
-	lhDB = nil
+	if lhDB != nil {
+		lhDB.Close()
+		lhDB = nil
+	}
 	lhDBMu.Unlock()
 
-	// Temp dir for DB + fake binary
+	// Reset worker state so each test gets fresh workers with the right DB.
+	lhWorkerMu.Lock()
+	lhWorkerStarted = false
+	lhJobQueue = nil
+	lhWorkerMu.Unlock()
+
 	tmp := t.TempDir()
-
-	// Point the DB to an in-process temp file
 	t.Setenv("LIGHTHOUSE_DB_PATH", filepath.Join(tmp, "lh_test.sqlite"))
+	t.Setenv("LIGHTHOUSE_WORKERS", "1")
+	t.Setenv("LIGHTHOUSE_QUEUE_SIZE", "10")
 
-	// Write a fake lighthouse script that just prints minimalLHR to stdout
+	// Fake lighthouse binary: prints minimalLHR to stdout
 	fakeBin := filepath.Join(tmp, "lighthouse")
 	script := "#!/bin/sh\ncat <<'LHEOF'\n" + minimalLHR + "\nLHEOF\n"
 	if err := os.WriteFile(fakeBin, []byte(script), 0755); err != nil {
@@ -143,9 +151,35 @@ func setupLhTest(t *testing.T) func() {
 	}
 }
 
+// processJobSync inserts a job directly and calls processLighthouseJob
+// synchronously, bypassing the async queue. Used to test job processing
+// without racing against background goroutines.
+func processJobSync(t *testing.T, url, strategy string, cats []string) (jobID, auditID int64) {
+	t.Helper()
+	if err := initLhDB(); err != nil {
+		t.Fatalf("initLhDB: %v", err)
+	}
+	createdAt := time.Now().UTC().Format(time.RFC3339)
+	res, err := lhDB.Exec(
+		`INSERT INTO lighthouse_jobs (status, url, strategy, categories, created_at)
+		 VALUES ('queued', ?, ?, ?, ?)`,
+		url, strategy, strings.Join(cats, ","), createdAt,
+	)
+	if err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	jobID, _ = res.LastInsertId()
+	processLighthouseJob(jobID) // synchronous — fake binary exits instantly
+
+	var aid sql.NullInt64
+	lhDB.QueryRow(`SELECT audit_id FROM lighthouse_jobs WHERE id=?`, jobID).Scan(&aid)
+	auditID = aid.Int64
+	return
+}
+
 // ── POST /api/lighthouse ──────────────────────────────────────────────────────
 
-func TestPostLighthouse_scores(t *testing.T) {
+func TestPostLighthouse_returnsAccepted(t *testing.T) {
 	cleanup := setupLhTest(t)
 	defer cleanup()
 
@@ -153,93 +187,26 @@ func TestPostLighthouse_scores(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/lighthouse", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
-
 	PostLighthouse(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("want 202, got %d: %s", rr.Code, rr.Body.String())
 	}
-
-	var result lighthouseResult
-	if err := json.NewDecoder(rr.Body).Decode(&result); err != nil {
-		t.Fatalf("decode response: %v", err)
+	var resp lighthouseJobResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
 	}
-
-	if result.AuditID == 0 {
-		t.Error("audit_id should be non-zero (record was saved)")
+	if resp.JobID == 0 {
+		t.Error("job_id should be non-zero")
 	}
-	if result.Scores.Performance == nil || *result.Scores.Performance != 72 {
-		t.Errorf("performance score: want 72, got %v", result.Scores.Performance)
+	if resp.Status != "queued" {
+		t.Errorf("status: want 'queued', got %q", resp.Status)
 	}
-	if result.Scores.SEO == nil || *result.Scores.SEO != 98 {
-		t.Errorf("seo score: want 98, got %v", result.Scores.SEO)
+	if resp.URL != "https://example.com" {
+		t.Errorf("url mismatch: %q", resp.URL)
 	}
-	if result.Scores.Accessibility == nil || *result.Scores.Accessibility != 91 {
-		t.Errorf("accessibility score: want 91, got %v", result.Scores.Accessibility)
-	}
-	if result.Scores.BestPractices == nil || *result.Scores.BestPractices != 83 {
-		t.Errorf("best_practices score: want 83, got %v", result.Scores.BestPractices)
-	}
-}
-
-func TestPostLighthouse_coreWebVitals(t *testing.T) {
-	cleanup := setupLhTest(t)
-	defer cleanup()
-
-	body := `{"url":"https://example.com"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/lighthouse", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-	PostLighthouse(rr, req)
-
-	var result lighthouseResult
-	json.NewDecoder(rr.Body).Decode(&result)
-
-	if result.CoreWebVitals["FCP"] != "1.2 s" {
-		t.Errorf("FCP: want '1.2 s', got %q", result.CoreWebVitals["FCP"])
-	}
-	if result.CoreWebVitals["LCP"] != "3.1 s" {
-		t.Errorf("LCP: want '3.1 s', got %q", result.CoreWebVitals["LCP"])
-	}
-	if result.CoreWebVitals["TTFB"] != "120 ms" {
-		t.Errorf("TTFB: want '120 ms', got %q", result.CoreWebVitals["TTFB"])
-	}
-}
-
-func TestPostLighthouse_failedPassedAudits(t *testing.T) {
-	cleanup := setupLhTest(t)
-	defer cleanup()
-
-	body := `{"url":"https://example.com"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/lighthouse", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-	PostLighthouse(rr, req)
-
-	var result lighthouseResult
-	json.NewDecoder(rr.Body).Decode(&result)
-
-	// image-alt (score=0) and largest-contentful-paint (score=0.6) should be failed
-	failedIDs := map[string]bool{}
-	for _, a := range result.FailedAudits {
-		failedIDs[a.ID] = true
-	}
-	for _, want := range []string{"image-alt", "largest-contentful-paint"} {
-		if !failedIDs[want] {
-			t.Errorf("expected %q in failed_audits", want)
-		}
-	}
-
-	// uses-https (score=1) should be passed, and only appear once (dedup across categories)
-	passedIDs := map[string]int{}
-	for _, a := range result.PassedAudits {
-		passedIDs[a.ID]++
-	}
-	if passedIDs["uses-https"] != 1 {
-		t.Errorf("uses-https should appear exactly once in passed_audits, got %d", passedIDs["uses-https"])
-	}
-	if failedIDs["uses-https"] {
-		t.Error("uses-https should NOT be in failed_audits")
+	if resp.Strategy != "mobile" {
+		t.Errorf("strategy mismatch: %q", resp.Strategy)
 	}
 }
 
@@ -272,13 +239,166 @@ func TestPostLighthouse_invalidJSON(t *testing.T) {
 	}
 }
 
+// ── processLighthouseJob (synchronous) ───────────────────────────────────────
+
+func TestProcessLighthouseJob_scores(t *testing.T) {
+	cleanup := setupLhTest(t)
+	defer cleanup()
+
+	_, auditID := processJobSync(t, "https://example.com", "mobile",
+		[]string{"performance", "seo", "accessibility", "best-practices"})
+
+	if auditID == 0 {
+		t.Fatal("audit_id should be non-zero after processing")
+	}
+	result := lhLoadAudit(auditID)
+	if result == nil {
+		t.Fatal("lhLoadAudit returned nil")
+	}
+	if result.Scores.Performance == nil || *result.Scores.Performance != 72 {
+		t.Errorf("performance: want 72, got %v", result.Scores.Performance)
+	}
+	if result.Scores.SEO == nil || *result.Scores.SEO != 98 {
+		t.Errorf("seo: want 98, got %v", result.Scores.SEO)
+	}
+	if result.Scores.Accessibility == nil || *result.Scores.Accessibility != 91 {
+		t.Errorf("accessibility: want 91, got %v", result.Scores.Accessibility)
+	}
+	if result.Scores.BestPractices == nil || *result.Scores.BestPractices != 83 {
+		t.Errorf("best_practices: want 83, got %v", result.Scores.BestPractices)
+	}
+}
+
+func TestProcessLighthouseJob_coreWebVitals(t *testing.T) {
+	cleanup := setupLhTest(t)
+	defer cleanup()
+
+	_, auditID := processJobSync(t, "https://example.com", "mobile",
+		[]string{"performance", "seo", "accessibility", "best-practices"})
+
+	result := lhLoadAudit(auditID)
+	if result == nil {
+		t.Fatal("lhLoadAudit returned nil")
+	}
+	if result.CoreWebVitals["FCP"] != "1.2 s" {
+		t.Errorf("FCP: want '1.2 s', got %q", result.CoreWebVitals["FCP"])
+	}
+	if result.CoreWebVitals["LCP"] != "3.1 s" {
+		t.Errorf("LCP: want '3.1 s', got %q", result.CoreWebVitals["LCP"])
+	}
+	if result.CoreWebVitals["TTFB"] != "120 ms" {
+		t.Errorf("TTFB: want '120 ms', got %q", result.CoreWebVitals["TTFB"])
+	}
+}
+
+func TestProcessLighthouseJob_failedPassedAudits(t *testing.T) {
+	cleanup := setupLhTest(t)
+	defer cleanup()
+
+	_, auditID := processJobSync(t, "https://example.com", "mobile",
+		[]string{"performance", "seo", "accessibility", "best-practices"})
+
+	result := lhLoadAudit(auditID)
+	if result == nil {
+		t.Fatal("lhLoadAudit returned nil")
+	}
+
+	failedIDs := map[string]bool{}
+	for _, a := range result.FailedAudits {
+		failedIDs[a.ID] = true
+	}
+	for _, want := range []string{"image-alt", "largest-contentful-paint"} {
+		if !failedIDs[want] {
+			t.Errorf("expected %q in failed_audits", want)
+		}
+	}
+
+	passedIDs := map[string]int{}
+	for _, a := range result.PassedAudits {
+		passedIDs[a.ID]++
+	}
+	if passedIDs["uses-https"] != 1 {
+		t.Errorf("uses-https should appear exactly once in passed_audits, got %d", passedIDs["uses-https"])
+	}
+	if failedIDs["uses-https"] {
+		t.Error("uses-https should NOT be in failed_audits")
+	}
+}
+
+// ── GET /api/lighthouse/jobs/{id} ────────────────────────────────────────────
+
+func TestGetLighthouseJob_done(t *testing.T) {
+	cleanup := setupLhTest(t)
+	defer cleanup()
+
+	jobID, auditID := processJobSync(t, "https://example.com", "desktop",
+		[]string{"performance", "seo"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/lighthouse/jobs/"+itoa(jobID), nil)
+	req = mux.SetURLVars(req, map[string]string{"id": itoa(jobID)})
+	rr := httptest.NewRecorder()
+	GetLighthouseJob(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var job lighthouseJobStatus
+	json.NewDecoder(rr.Body).Decode(&job)
+
+	if job.Status != "done" {
+		t.Errorf("status: want 'done', got %q", job.Status)
+	}
+	if job.Result == nil {
+		t.Fatal("result should be populated for done job")
+	}
+	if job.Result.AuditID != auditID {
+		t.Errorf("audit_id mismatch: want %d, got %d", auditID, job.Result.AuditID)
+	}
+	if job.Result.Strategy != "desktop" {
+		t.Errorf("strategy: want 'desktop', got %q", job.Result.Strategy)
+	}
+	if job.Result.Scores.Performance == nil || *job.Result.Scores.Performance != 72 {
+		t.Errorf("performance score: %v", job.Result.Scores.Performance)
+	}
+}
+
+func TestGetLighthouseJob_notFound(t *testing.T) {
+	cleanup := setupLhTest(t)
+	defer cleanup()
+	if err := initLhDB(); err != nil {
+		t.Fatalf("initLhDB: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/lighthouse/jobs/9999", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "9999"})
+	rr := httptest.NewRecorder()
+	GetLighthouseJob(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("want 404, got %d", rr.Code)
+	}
+}
+
+func TestGetLighthouseJob_invalidID(t *testing.T) {
+	cleanup := setupLhTest(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/lighthouse/jobs/abc", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "abc"})
+	rr := httptest.NewRecorder()
+	GetLighthouseJob(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("want 400, got %d", rr.Code)
+	}
+}
+
 // ── GET /api/lighthouse/audits ───────────────────────────────────────────────
 
 func TestGetLighthouseAudits_empty(t *testing.T) {
 	cleanup := setupLhTest(t)
 	defer cleanup()
 
-	// Init DB without running any audit
 	if err := initLhDB(); err != nil {
 		t.Fatalf("initLhDB: %v", err)
 	}
@@ -300,17 +420,14 @@ func TestGetLighthouseAudits_empty(t *testing.T) {
 	}
 }
 
-func TestGetLighthouseAudits_afterPost(t *testing.T) {
+func TestGetLighthouseAudits_afterProcess(t *testing.T) {
 	cleanup := setupLhTest(t)
 	defer cleanup()
 
-	// Run two audits for different URLs
-	for _, u := range []string{"https://example.com", "https://other.com"} {
-		body := `{"url":"` + u + `"}`
-		req := httptest.NewRequest(http.MethodPost, "/api/lighthouse", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		PostLighthouse(httptest.NewRecorder(), req)
-	}
+	processJobSync(t, "https://example.com", "mobile",
+		[]string{"performance", "seo", "accessibility", "best-practices"})
+	processJobSync(t, "https://other.com", "desktop",
+		[]string{"performance", "seo", "accessibility", "best-practices"})
 
 	// List all
 	req := httptest.NewRequest(http.MethodGet, "/api/lighthouse/audits", nil)
@@ -340,7 +457,7 @@ func TestGetLighthouseAudits_afterPost(t *testing.T) {
 	if resp2.Count != 1 {
 		t.Errorf("url filter: want count=1, got %d", resp2.Count)
 	}
-	if resp2.Audits[0].URL != "https://example.com" {
+	if len(resp2.Audits) > 0 && resp2.Audits[0].URL != "https://example.com" {
 		t.Errorf("url filter: wrong url %q", resp2.Audits[0].URL)
 	}
 }
@@ -351,36 +468,26 @@ func TestGetLighthouseAuditByID_roundtrip(t *testing.T) {
 	cleanup := setupLhTest(t)
 	defer cleanup()
 
-	// Run one audit and capture the audit_id
-	body := `{"url":"https://example.com","strategy":"desktop"}`
-	postReq := httptest.NewRequest(http.MethodPost, "/api/lighthouse", strings.NewReader(body))
-	postReq.Header.Set("Content-Type", "application/json")
-	postRR := httptest.NewRecorder()
-	PostLighthouse(postRR, postReq)
+	_, auditID := processJobSync(t, "https://example.com", "desktop",
+		[]string{"performance", "seo", "accessibility", "best-practices"})
 
-	var posted lighthouseResult
-	json.NewDecoder(postRR.Body).Decode(&posted)
-
-	if posted.AuditID == 0 {
-		t.Fatal("POST returned audit_id=0")
+	if auditID == 0 {
+		t.Fatal("auditID is 0 after processing")
 	}
 
-	// Retrieve by ID
-	getReq := httptest.NewRequest(http.MethodGet, "/api/lighthouse/audits/"+
-		itoa(posted.AuditID), nil)
-	getReq = mux.SetURLVars(getReq, map[string]string{"id": itoa(posted.AuditID)})
+	getReq := httptest.NewRequest(http.MethodGet, "/api/lighthouse/audits/"+itoa(auditID), nil)
+	getReq = mux.SetURLVars(getReq, map[string]string{"id": itoa(auditID)})
 	getRR := httptest.NewRecorder()
 	GetLighthouseAuditByID(getRR, getReq)
 
 	if getRR.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", getRR.Code, getRR.Body.String())
 	}
-
 	var fetched lighthouseResult
 	json.NewDecoder(getRR.Body).Decode(&fetched)
 
-	if fetched.AuditID != posted.AuditID {
-		t.Errorf("audit_id mismatch: want %d, got %d", posted.AuditID, fetched.AuditID)
+	if fetched.AuditID != auditID {
+		t.Errorf("audit_id mismatch: want %d, got %d", auditID, fetched.AuditID)
 	}
 	if fetched.URL != "https://example.com" {
 		t.Errorf("url mismatch: %q", fetched.URL)
@@ -402,7 +509,6 @@ func TestGetLighthouseAuditByID_roundtrip(t *testing.T) {
 func TestGetLighthouseAuditByID_notFound(t *testing.T) {
 	cleanup := setupLhTest(t)
 	defer cleanup()
-
 	if err := initLhDB(); err != nil {
 		t.Fatalf("initLhDB: %v", err)
 	}
@@ -442,7 +548,6 @@ func TestBuildLighthouseResult_deduplication(t *testing.T) {
 	cats := []string{"performance", "seo", "accessibility", "best-practices"}
 	result := buildLighthouseResult("https://example.com", "mobile", cats, lhr)
 
-	// Count occurrences of each audit ID across both lists
 	idCount := map[string]int{}
 	for _, a := range result.FailedAudits {
 		idCount[a.ID]++
@@ -450,7 +555,6 @@ func TestBuildLighthouseResult_deduplication(t *testing.T) {
 	for _, a := range result.PassedAudits {
 		idCount[a.ID]++
 	}
-
 	for id, count := range idCount {
 		if count > 1 {
 			t.Errorf("audit %q appears %d times (want 1) — deduplication broken", id, count)
@@ -498,11 +602,10 @@ func TestSaveLighthouseResult_persistsAndLoads(t *testing.T) {
 		t.Fatal("saveLighthouseResult returned 0")
 	}
 
-	// Verify raw DB row
 	var url, strategy string
 	var sp, ss sql.NullInt64
 	err := lhDB.QueryRow(
-		`SELECT url, strategy, score_performance, score_seo FROM lighthouse_audits WHERE id = ?`, id,
+		`SELECT url, strategy, score_performance, score_seo FROM lighthouse_audits WHERE id=?`, id,
 	).Scan(&url, &strategy, &sp, &ss)
 	if err != nil {
 		t.Fatalf("query: %v", err)

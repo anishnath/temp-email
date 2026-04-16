@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"net/http"
@@ -39,10 +40,27 @@ CREATE TABLE IF NOT EXISTS lighthouse_audits (
   score_seo            INTEGER,
   core_web_vitals      TEXT,
   failed_audits        TEXT,
-  passed_audits        TEXT
+  passed_audits        TEXT,
+  screenshot           TEXT,
+  thumbnails           TEXT
 );
-CREATE INDEX IF NOT EXISTS lh_url ON lighthouse_audits(url);
+CREATE INDEX IF NOT EXISTS lh_url     ON lighthouse_audits(url);
 CREATE INDEX IF NOT EXISTS lh_fetched ON lighthouse_audits(fetched_at DESC);
+
+CREATE TABLE IF NOT EXISTS lighthouse_jobs (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  status      TEXT NOT NULL DEFAULT 'queued',
+  url         TEXT NOT NULL,
+  strategy    TEXT NOT NULL DEFAULT 'mobile',
+  categories  TEXT NOT NULL DEFAULT '',
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  started_at  TEXT,
+  finished_at TEXT,
+  audit_id    INTEGER,
+  error       TEXT
+);
+CREATE INDEX IF NOT EXISTS lhj_status  ON lighthouse_jobs(status);
+CREATE INDEX IF NOT EXISTS lhj_created ON lighthouse_jobs(created_at DESC);
 `
 
 func lhDBPath() string {
@@ -51,6 +69,13 @@ func lhDBPath() string {
 	}
 	return "data/lighthouse.sqlite"
 }
+
+// lhWorkerStarted is protected by lhWorkerMu.
+// Using a plain bool (not sync.Once) so tests can reset it.
+var (
+	lhWorkerMu      sync.Mutex
+	lhWorkerStarted bool
+)
 
 func initLhDB() error {
 	lhDBMu.Lock()
@@ -70,8 +95,113 @@ func initLhDB() error {
 	if _, err := db.Exec(lhSchema); err != nil {
 		return err
 	}
+	// Migrate: add columns added after initial schema (safe to run on existing DBs).
+	for _, col := range []string{
+		"ALTER TABLE lighthouse_audits ADD COLUMN screenshot TEXT",
+		"ALTER TABLE lighthouse_audits ADD COLUMN thumbnails TEXT",
+	} {
+		db.Exec(col) // ignore "duplicate column" errors on existing DBs
+	}
 	lhDB = db
+	startLighthouseWorkers()
 	return nil
+}
+
+func startLighthouseWorkers() {
+	lhWorkerMu.Lock()
+	defer lhWorkerMu.Unlock()
+	if lhWorkerStarted {
+		return
+	}
+	lhJobQueue = make(chan int64, lhQueueSize())
+	n := lhWorkerCount()
+	log.Printf("lighthouse: starting %d worker(s), queue size %d", n, lhQueueSize())
+	for i := 0; i < n; i++ {
+		go lighthouseWorker()
+	}
+	lhWorkerStarted = true
+}
+
+// ── Queue / worker ────────────────────────────────────────────────────────────
+
+var lhJobQueue chan int64
+
+func lhWorkerCount() int {
+	if v := os.Getenv("LIGHTHOUSE_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 10 {
+			return n
+		}
+	}
+	return 2
+}
+
+func lhQueueSize() int {
+	if v := os.Getenv("LIGHTHOUSE_QUEUE_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 1000 {
+			return n
+		}
+	}
+	return 100
+}
+
+func lighthouseWorker() {
+	for jobID := range lhJobQueue {
+		processLighthouseJob(jobID)
+	}
+}
+
+func processLighthouseJob(jobID int64) {
+	// Safely read the current DB reference; bail if DB was reset (e.g. in tests).
+	lhDBMu.Lock()
+	db := lhDB
+	lhDBMu.Unlock()
+	if db == nil {
+		log.Printf("lighthouse worker: db is nil, skipping job %d", jobID)
+		return
+	}
+
+	// Mark running.
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, _ = db.Exec(
+		`UPDATE lighthouse_jobs SET status='running', started_at=? WHERE id=?`,
+		now, jobID,
+	)
+
+	// Read job details.
+	var url, strategy, catsStr string
+	err := db.QueryRow(
+		`SELECT url, strategy, categories FROM lighthouse_jobs WHERE id=?`, jobID,
+	).Scan(&url, &strategy, &catsStr)
+	if err != nil {
+		lhJobFailDB(db, jobID, "could not read job: "+err.Error())
+		return
+	}
+	cats := splitCats(catsStr)
+
+	// Build and run lighthouse.
+	result, err := runLighthouse(url, strategy, cats)
+	if err != nil {
+		lhJobFailDB(db, jobID, err.Error())
+		return
+	}
+
+	// Save audit and link to job.
+	auditID := saveLighthouseResultDB(db, result)
+	done := time.Now().UTC().Format(time.RFC3339)
+	_, _ = db.Exec(
+		`UPDATE lighthouse_jobs SET status='done', finished_at=?, audit_id=? WHERE id=?`,
+		done, auditID, jobID,
+	)
+	log.Printf("lighthouse job %d done → audit %d", jobID, auditID)
+}
+
+func lhJobFailDB(db *sql.DB, jobID int64, msg string) {
+	done := time.Now().UTC().Format(time.RFC3339)
+	_, _ = db.Exec(
+		`UPDATE lighthouse_jobs SET status='failed', finished_at=?, error=? WHERE id=?`,
+		done, msg, jobID,
+	)
+	log.Printf("lighthouse job %d failed: %s", jobID, msg)
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -89,25 +219,76 @@ type lighthouseScores struct {
 	SEO           *int `json:"seo,omitempty"`
 }
 
-type lighthouseAudit struct {
-	ID           string   `json:"id"`
-	Title        string   `json:"title"`
-	Description  string   `json:"description,omitempty"`
-	Score        *float64 `json:"score"`
-	DisplayValue string   `json:"display_value,omitempty"`
+// auditDetails holds the evidence items from a Lighthouse audit.
+// Items are kept as raw JSON because their shape varies per audit type.
+type auditDetails struct {
+	Type                string            `json:"type,omitempty"`
+	Items               []json.RawMessage `json:"items,omitempty"`
+	OverallSavingsMs    float64           `json:"overall_savings_ms,omitempty"`
+	OverallSavingsBytes int64             `json:"overall_savings_bytes,omitempty"`
 }
 
-// lighthouseResult is returned by POST and GET /audits/{id}.
+type lighthouseAudit struct {
+	ID           string        `json:"id"`
+	Title        string        `json:"title"`
+	Description  string        `json:"description,omitempty"`
+	Score        *float64      `json:"score"`
+	DisplayValue string        `json:"display_value,omitempty"`
+	Details      *auditDetails `json:"details,omitempty"`
+}
+
+// lighthouseScreenshot holds the page screenshot captured by Lighthouse.
+// Data is a data URL: "data:image/jpeg;base64,..."
+type lighthouseScreenshot struct {
+	Data   string `json:"data"` // base64 data URL
+	Width  int    `json:"width,omitempty"`
+	Height int    `json:"height,omitempty"`
+}
+
+// lighthouseThumbnail is one frame from the page-load filmstrip.
+type lighthouseThumbnail struct {
+	Timestamp float64 `json:"timestamp"` // ms from start
+	Data      string  `json:"data"`      // base64 data URL
+}
+
+// lighthouseResult is the full audit result (stored in SQLite and returned by GET /audits/{id}).
 type lighthouseResult struct {
-	AuditID       int64             `json:"audit_id"`
-	URL           string            `json:"url"`
-	Strategy      string            `json:"strategy"`
-	Categories    []string          `json:"categories"`
-	FetchedAt     string            `json:"fetched_at"`
-	Scores        lighthouseScores  `json:"scores"`
-	CoreWebVitals map[string]string `json:"core_web_vitals,omitempty"`
-	FailedAudits  []lighthouseAudit `json:"failed_audits"`
-	PassedAudits  []lighthouseAudit `json:"passed_audits"`
+	AuditID       int64                 `json:"audit_id"`
+	URL           string                `json:"url"`
+	Strategy      string                `json:"strategy"`
+	Categories    []string              `json:"categories"`
+	FetchedAt     string                `json:"fetched_at"`
+	Scores        lighthouseScores      `json:"scores"`
+	CoreWebVitals map[string]string     `json:"core_web_vitals,omitempty"`
+	Screenshot    *lighthouseScreenshot `json:"screenshot,omitempty"`
+	Thumbnails    []lighthouseThumbnail `json:"thumbnails,omitempty"`
+	FailedAudits  []lighthouseAudit     `json:"failed_audits"`
+	PassedAudits  []lighthouseAudit     `json:"passed_audits"`
+}
+
+// lighthouseJobResponse is returned immediately by POST /api/lighthouse.
+type lighthouseJobResponse struct {
+	JobID      int64    `json:"job_id"`
+	Status     string   `json:"status"`
+	URL        string   `json:"url"`
+	Strategy   string   `json:"strategy"`
+	Categories []string `json:"categories"`
+	CreatedAt  string   `json:"created_at"`
+	QueueDepth int      `json:"queue_depth"`
+}
+
+// lighthouseJobStatus is returned by GET /api/lighthouse/jobs/{id}.
+type lighthouseJobStatus struct {
+	JobID      int64             `json:"job_id"`
+	Status     string            `json:"status"` // queued | running | done | failed
+	URL        string            `json:"url"`
+	Strategy   string            `json:"strategy"`
+	Categories []string          `json:"categories"`
+	CreatedAt  string            `json:"created_at"`
+	StartedAt  string            `json:"started_at,omitempty"`
+	FinishedAt string            `json:"finished_at,omitempty"`
+	Error      string            `json:"error,omitempty"`
+	Result     *lighthouseResult `json:"result,omitempty"` // populated when status == "done"
 }
 
 // lighthouseListItem is the lightweight row used in GET /api/lighthouse/audits.
@@ -129,13 +310,53 @@ type lhJSON struct {
 		} `json:"auditRefs"`
 	} `json:"categories"`
 	Audits map[string]struct {
-		ID               string   `json:"id"`
-		Title            string   `json:"title"`
-		Description      string   `json:"description"`
-		Score            *float64 `json:"score"`
-		ScoreDisplayMode string   `json:"scoreDisplayMode"`
-		DisplayValue     string   `json:"displayValue"`
+		ID               string          `json:"id"`
+		Title            string          `json:"title"`
+		Description      string          `json:"description"`
+		Score            *float64        `json:"score"`
+		ScoreDisplayMode string          `json:"scoreDisplayMode"`
+		DisplayValue     string          `json:"displayValue"`
+		Details          json.RawMessage `json:"details"`
 	} `json:"audits"`
+}
+
+// lhScreenshotDetails matches the details block of the final-screenshot audit.
+type lhScreenshotDetails struct {
+	Type   string `json:"type"`
+	Data   string `json:"data"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+}
+
+// lhThumbnailDetails matches the details block of the screenshot-thumbnails audit.
+type lhThumbnailDetails struct {
+	Type  string `json:"type"`
+	Items []struct {
+		Timestamp float64 `json:"timestamp"`
+		Data      string  `json:"data"`
+	} `json:"items"`
+}
+
+// lhRawDetails is used to partially unmarshal an audit's details block.
+type lhRawDetails struct {
+	Type                string            `json:"type"`
+	Items               []json.RawMessage `json:"items"`
+	OverallSavingsMs    float64           `json:"overallSavingsMs"`
+	OverallSavingsBytes int64             `json:"overallSavingsBytes"`
+}
+
+// auditIDsWithNoUsefulItems are audits whose details.items are either binary,
+// extremely large, or not actionable evidence (screenshots, raw traces, etc.).
+var auditIDsWithNoUsefulItems = map[string]bool{
+	"screenshot-thumbnails": true,
+	"final-screenshot":      true,
+	"network-requests":      true,
+	"main-thread-tasks":     true,
+	"metrics":               true,
+	"script-treemap-data":   true,
+	"resource-summary":      true,
+	"diagnostics":           true,
+	"long-tasks":            true,
 }
 
 // ── Config helpers ────────────────────────────────────────────────────────────
@@ -165,8 +386,7 @@ func lhTimeoutSec() int {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-// PostLighthouse runs Lighthouse, stores the result in SQLite, and returns it
-// with an audit_id for later retrieval.
+// PostLighthouse enqueues an async Lighthouse audit job and returns immediately.
 //
 // POST /api/lighthouse
 func PostLighthouse(w http.ResponseWriter, r *http.Request) {
@@ -189,67 +409,99 @@ func PostLighthouse(w http.ResponseWriter, r *http.Request) {
 	if req.Strategy == "desktop" {
 		strategy = "desktop"
 	}
-
 	cats := req.Categories
 	if len(cats) == 0 {
 		cats = []string{"performance", "seo", "accessibility", "best-practices"}
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(lhTimeoutSec())*time.Second)
-	defer cancel()
-
-	// lighthouse is invoked via exec (no shell), so chrome flags must be passed
-	// as a single --chrome-flags argument with the value quoted as one token.
-	// Split into individual per-flag arguments so lighthouse can reassemble them.
-	chromeFlags := strings.Fields(lhChromeFlags())
-	chromeFlagArgs := make([]string, 0, len(chromeFlags))
-	for _, f := range chromeFlags {
-		chromeFlagArgs = append(chromeFlagArgs, "--chrome-flags="+f)
+	// Reject if queue is full to protect the server.
+	if len(lhJobQueue) >= cap(lhJobQueue) {
+		http.Error(w, "queue full, try again later", http.StatusTooManyRequests)
+		return
 	}
 
-	args := []string{
-		req.URL,
-		"--output", "json",
-		"--output-path", "stdout",
-		"--quiet",
-		"--only-categories=" + strings.Join(cats, ","),
-		"--form-factor=" + strategy,
-	}
-	args = append(args, chromeFlagArgs...)
-
-	log.Printf("lighthouse cmd: %s %v", lhCmd(), args)
-	cmd := exec.CommandContext(ctx, lhCmd(), args...)
-	var stderrBuf strings.Builder
-	cmd.Stderr = &stderrBuf
-	out, err := cmd.Output()
+	createdAt := time.Now().UTC().Format(time.RFC3339)
+	res, err := lhDB.Exec(
+		`INSERT INTO lighthouse_jobs (status, url, strategy, categories, created_at)
+		 VALUES ('queued', ?, ?, ?, ?)`,
+		req.URL, strategy, strings.Join(cats, ","), createdAt,
+	)
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			http.Error(w, "lighthouse timed out", http.StatusGatewayTimeout)
-			return
-		}
-		log.Printf("lighthouse exec error: %v\nstderr: %s", err, stderrBuf.String())
-		http.Error(w, "lighthouse failed: "+err.Error()+"\n"+stderrBuf.String(), http.StatusInternalServerError)
+		log.Printf("lighthouse enqueue: %v", err)
+		http.Error(w, "failed to create job", http.StatusInternalServerError)
 		return
 	}
-	if stderrBuf.Len() > 0 {
-		log.Printf("lighthouse stderr: %s", stderrBuf.String())
-	}
+	jobID, _ := res.LastInsertId()
 
-	var lhr lhJSON
-	if err := json.Unmarshal(out, &lhr); err != nil {
-		log.Printf("lighthouse json parse: %v", err)
-		http.Error(w, "failed to parse lighthouse output", http.StatusInternalServerError)
-		return
-	}
-
-	result := buildLighthouseResult(req.URL, strategy, cats, lhr)
-	result.AuditID = saveLighthouseResult(result)
+	// Non-blocking send — we already checked capacity above.
+	lhJobQueue <- jobID
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(result)
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(lighthouseJobResponse{
+		JobID:      jobID,
+		Status:     "queued",
+		URL:        req.URL,
+		Strategy:   strategy,
+		Categories: cats,
+		CreatedAt:  createdAt,
+		QueueDepth: len(lhJobQueue),
+	})
 }
 
-// GetLighthouseAudits lists recent audits, optionally filtered by URL.
+// GetLighthouseJob returns the status (and result when done) for a job.
+//
+// GET /api/lighthouse/jobs/{id}
+func GetLighthouseJob(w http.ResponseWriter, r *http.Request) {
+	if err := initLhDB(); err != nil {
+		http.Error(w, "lighthouse db: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	id, err := strconv.ParseInt(mux.Vars(r)["id"], 10, 64)
+	if err != nil || id < 1 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	var job lighthouseJobStatus
+	var catsStr string
+	var startedAt, finishedAt, jobError sql.NullString
+	var auditID sql.NullInt64
+
+	err = lhDB.QueryRow(`
+		SELECT id, status, url, strategy, categories,
+		       created_at, started_at, finished_at, audit_id, error
+		FROM lighthouse_jobs WHERE id=?`, id).Scan(
+		&job.JobID, &job.Status, &job.URL, &job.Strategy, &catsStr,
+		&job.CreatedAt, &startedAt, &finishedAt, &auditID, &jobError,
+	)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("lighthouse job get: %v", err)
+		http.Error(w, "query failed", http.StatusInternalServerError)
+		return
+	}
+
+	job.Categories = splitCats(catsStr)
+	job.StartedAt = startedAt.String
+	job.FinishedAt = finishedAt.String
+	job.Error = jobError.String
+
+	// Attach full result when the job completed successfully.
+	if job.Status == "done" && auditID.Valid {
+		result := lhLoadAudit(auditID.Int64)
+		job.Result = result
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(job)
+}
+
+// GetLighthouseAudits lists completed audits, optionally filtered by URL.
 //
 // GET /api/lighthouse/audits?url=https://example.com&limit=20
 func GetLighthouseAudits(w http.ResponseWriter, r *http.Request) {
@@ -329,50 +581,62 @@ func GetLighthouseAuditByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var result lighthouseResult
-	var catsStr, cwvJSON, failedJSON, passedJSON sql.NullString
-	var sp, sa, sbp, ss sql.NullInt64
-
-	err = lhDB.QueryRow(`
-		SELECT id, url, strategy, categories, fetched_at,
-		       score_performance, score_accessibility, score_best_practices, score_seo,
-		       core_web_vitals, failed_audits, passed_audits
-		FROM lighthouse_audits WHERE id = ?`, id).Scan(
-		&result.AuditID, &result.URL, &result.Strategy, &catsStr, &result.FetchedAt,
-		&sp, &sa, &sbp, &ss,
-		&cwvJSON, &failedJSON, &passedJSON,
-	)
-	if err == sql.ErrNoRows {
+	result := lhLoadAudit(id)
+	if result == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
-	}
-	if err != nil {
-		log.Printf("lighthouse get: %v", err)
-		http.Error(w, "query failed", http.StatusInternalServerError)
-		return
-	}
-
-	result.Categories = splitCats(catsStr.String)
-	result.Scores = nullIntsToScores(sp, sa, sbp, ss)
-
-	if cwvJSON.Valid && cwvJSON.String != "" {
-		_ = json.Unmarshal([]byte(cwvJSON.String), &result.CoreWebVitals)
-	}
-	if failedJSON.Valid && failedJSON.String != "" {
-		_ = json.Unmarshal([]byte(failedJSON.String), &result.FailedAudits)
-	}
-	if passedJSON.Valid && passedJSON.String != "" {
-		_ = json.Unmarshal([]byte(passedJSON.String), &result.PassedAudits)
-	}
-	if result.FailedAudits == nil {
-		result.FailedAudits = []lighthouseAudit{}
-	}
-	if result.PassedAudits == nil {
-		result.PassedAudits = []lighthouseAudit{}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(result)
+}
+
+// ── Core lighthouse runner ─────────────────────────────────────────────────────
+
+func runLighthouse(url, strategy string, cats []string) (lighthouseResult, error) {
+	chromeFlags := strings.Fields(lhChromeFlags())
+	chromeFlagArgs := make([]string, 0, len(chromeFlags))
+	for _, f := range chromeFlags {
+		chromeFlagArgs = append(chromeFlagArgs, "--chrome-flags="+f)
+	}
+
+	args := []string{
+		url,
+		"--output", "json",
+		"--output-path", "stdout",
+		"--quiet",
+		"--only-categories=" + strings.Join(cats, ","),
+		"--form-factor=" + strategy,
+	}
+	args = append(args, chromeFlagArgs...)
+
+	log.Printf("lighthouse cmd: %s %v", lhCmd(), args)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(lhTimeoutSec())*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, lhCmd(), args...)
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+	out, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return lighthouseResult{}, fmt.Errorf("lighthouse timed out after %ds", lhTimeoutSec())
+		}
+		stderr := stderrBuf.String()
+		log.Printf("lighthouse exec error: %v\nstderr: %s", err, stderr)
+		return lighthouseResult{}, fmt.Errorf("%v: %s", err, stderr)
+	}
+	if stderrBuf.Len() > 0 {
+		log.Printf("lighthouse stderr: %s", stderrBuf.String())
+	}
+
+	var lhr lhJSON
+	if err := json.Unmarshal(out, &lhr); err != nil {
+		log.Printf("lighthouse json parse: %v", err)
+		return lighthouseResult{}, fmt.Errorf("failed to parse lighthouse output: %v", err)
+	}
+
+	return buildLighthouseResult(url, strategy, cats, lhr), nil
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -427,6 +691,33 @@ func buildLighthouseResult(url, strategy string, cats []string, lhr lhJSON) ligh
 		result.CoreWebVitals = cwv
 	}
 
+	// Extract final screenshot.
+	if ss, ok := lhr.Audits["final-screenshot"]; ok && len(ss.Details) > 0 {
+		var d lhScreenshotDetails
+		if err := json.Unmarshal(ss.Details, &d); err == nil && d.Data != "" {
+			result.Screenshot = &lighthouseScreenshot{
+				Data:   d.Data,
+				Width:  d.Width,
+				Height: d.Height,
+			}
+		}
+	}
+
+	// Extract filmstrip thumbnails.
+	if th, ok := lhr.Audits["screenshot-thumbnails"]; ok && len(th.Details) > 0 {
+		var d lhThumbnailDetails
+		if err := json.Unmarshal(th.Details, &d); err == nil {
+			for _, item := range d.Items {
+				if item.Data != "" {
+					result.Thumbnails = append(result.Thumbnails, lighthouseThumbnail{
+						Timestamp: item.Timestamp,
+						Data:      item.Data,
+					})
+				}
+			}
+		}
+	}
+
 	seen := map[string]bool{}
 	for _, catKey := range []string{"performance", "accessibility", "best-practices", "seo"} {
 		cat, ok := lhr.Categories[catKey]
@@ -443,6 +734,7 @@ func buildLighthouseResult(url, strategy string, cats []string, lhr lhJSON) ligh
 			if mode == "informational" || mode == "not-applicable" || mode == "manual" {
 				continue
 			}
+			isFailed := a.Score == nil || *a.Score < 0.9
 			item := lighthouseAudit{
 				ID:           a.ID,
 				Title:        a.Title,
@@ -450,7 +742,18 @@ func buildLighthouseResult(url, strategy string, cats []string, lhr lhJSON) ligh
 				Score:        a.Score,
 				DisplayValue: a.DisplayValue,
 			}
-			if a.Score == nil || *a.Score < 0.9 {
+			if isFailed && len(a.Details) > 0 && !auditIDsWithNoUsefulItems[a.ID] {
+				var raw lhRawDetails
+				if err := json.Unmarshal(a.Details, &raw); err == nil && len(raw.Items) > 0 {
+					item.Details = &auditDetails{
+						Type:                raw.Type,
+						Items:               raw.Items,
+						OverallSavingsMs:    raw.OverallSavingsMs,
+						OverallSavingsBytes: raw.OverallSavingsBytes,
+					}
+				}
+			}
+			if isFailed {
 				result.FailedAudits = append(result.FailedAudits, item)
 			} else {
 				result.PassedAudits = append(result.PassedAudits, item)
@@ -461,19 +764,26 @@ func buildLighthouseResult(url, strategy string, cats []string, lhr lhJSON) ligh
 }
 
 func saveLighthouseResult(r lighthouseResult) int64 {
+	return saveLighthouseResultDB(lhDB, r)
+}
+
+func saveLighthouseResultDB(db *sql.DB, r lighthouseResult) int64 {
 	cwvJSON, _ := json.Marshal(r.CoreWebVitals)
 	failedJSON, _ := json.Marshal(r.FailedAudits)
 	passedJSON, _ := json.Marshal(r.PassedAudits)
+	screenshotJSON, _ := json.Marshal(r.Screenshot)
+	thumbnailsJSON, _ := json.Marshal(r.Thumbnails)
 
-	res, err := lhDB.Exec(`
+	res, err := db.Exec(`
 		INSERT INTO lighthouse_audits
 		  (url, strategy, categories, fetched_at,
 		   score_performance, score_accessibility, score_best_practices, score_seo,
-		   core_web_vitals, failed_audits, passed_audits)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		   core_web_vitals, failed_audits, passed_audits, screenshot, thumbnails)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.URL, r.Strategy, strings.Join(r.Categories, ","), r.FetchedAt,
 		r.Scores.Performance, r.Scores.Accessibility, r.Scores.BestPractices, r.Scores.SEO,
 		string(cwvJSON), string(failedJSON), string(passedJSON),
+		string(screenshotJSON), string(thumbnailsJSON),
 	)
 	if err != nil {
 		log.Printf("lighthouse save: %v", err)
@@ -481,6 +791,61 @@ func saveLighthouseResult(r lighthouseResult) int64 {
 	}
 	id, _ := res.LastInsertId()
 	return id
+}
+
+// lhLoadAudit reads a full lighthouseResult from the DB by audit ID.
+// Returns nil if not found.
+func lhLoadAudit(id int64) *lighthouseResult {
+	var result lighthouseResult
+	var catsStr string
+	var cwvJSON, failedJSON, passedJSON, screenshotJSON, thumbnailsJSON sql.NullString
+	var sp, sa, sbp, ss sql.NullInt64
+
+	err := lhDB.QueryRow(`
+		SELECT id, url, strategy, categories, fetched_at,
+		       score_performance, score_accessibility, score_best_practices, score_seo,
+		       core_web_vitals, failed_audits, passed_audits, screenshot, thumbnails
+		FROM lighthouse_audits WHERE id=?`, id).Scan(
+		&result.AuditID, &result.URL, &result.Strategy, &catsStr, &result.FetchedAt,
+		&sp, &sa, &sbp, &ss,
+		&cwvJSON, &failedJSON, &passedJSON, &screenshotJSON, &thumbnailsJSON,
+	)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		log.Printf("lighthouse load audit: %v", err)
+		return nil
+	}
+
+	result.Categories = splitCats(catsStr)
+	result.Scores = nullIntsToScores(sp, sa, sbp, ss)
+
+	if cwvJSON.Valid && cwvJSON.String != "" {
+		_ = json.Unmarshal([]byte(cwvJSON.String), &result.CoreWebVitals)
+	}
+	if failedJSON.Valid && failedJSON.String != "" {
+		_ = json.Unmarshal([]byte(failedJSON.String), &result.FailedAudits)
+	}
+	if passedJSON.Valid && passedJSON.String != "" {
+		_ = json.Unmarshal([]byte(passedJSON.String), &result.PassedAudits)
+	}
+	if screenshotJSON.Valid && screenshotJSON.String != "" && screenshotJSON.String != "null" {
+		var sc lighthouseScreenshot
+		if json.Unmarshal([]byte(screenshotJSON.String), &sc) == nil && sc.Data != "" {
+			result.Screenshot = &sc
+		}
+	}
+	if thumbnailsJSON.Valid && thumbnailsJSON.String != "" && thumbnailsJSON.String != "null" {
+		_ = json.Unmarshal([]byte(thumbnailsJSON.String), &result.Thumbnails)
+	}
+	if result.FailedAudits == nil {
+		result.FailedAudits = []lighthouseAudit{}
+	}
+	if result.PassedAudits == nil {
+		result.PassedAudits = []lighthouseAudit{}
+	}
+	return &result
 }
 
 func splitCats(s string) []string {

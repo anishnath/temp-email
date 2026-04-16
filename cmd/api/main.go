@@ -93,8 +93,9 @@ func main() {
 	r.HandleFunc("/screenshot", api.PostScreenshot).Methods("POST")
 	r.HandleFunc("/screenshots", api.PostBatchScreenshots).Methods("POST")
 
-	// Lighthouse single-page audit (runs local lighthouse CLI, results stored in SQLite)
+	// Lighthouse single-page audit (async job queue, results stored in SQLite)
 	r.HandleFunc("/api/lighthouse", api.PostLighthouse).Methods("POST")
+	r.HandleFunc("/api/lighthouse/jobs/{id}", api.GetLighthouseJob).Methods("GET")
 	r.HandleFunc("/api/lighthouse/audits", api.GetLighthouseAudits).Methods("GET")
 	r.HandleFunc("/api/lighthouse/audits/{id}", api.GetLighthouseAuditByID).Methods("GET")
 
