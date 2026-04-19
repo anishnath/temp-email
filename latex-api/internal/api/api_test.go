@@ -75,7 +75,7 @@ func TestHandleJobStatus_NotFound(t *testing.T) {
 }
 
 func TestHandleJobStatus_Found(t *testing.T) {
-	job := model.NewCompileJob("x")
+	job := model.NewCompileJob("x", nil)
 	model.RegisterJob(job)
 
 	req := httptest.NewRequest("GET", "/api/jobs/"+job.ID+"/status", nil)

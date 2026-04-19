@@ -44,6 +44,14 @@ func Compile(job *model.CompileJob) {
 		filestore.ScheduleCleanup(job.ID, cleanupAfter)
 	}()
 
+	if len(job.FileIDs) > 0 {
+		if err := filestore.CopyUploadedFiles(job.FileIDs, workDir); err != nil {
+			closeLogs = true
+			job.SetError("failed to copy uploaded files: " + err.Error())
+			return
+		}
+	}
+
 	texPath := filepath.Join(workDir, documentName)
 	if err := os.WriteFile(texPath, []byte(job.Source), 0600); err != nil {
 		closeLogs = true

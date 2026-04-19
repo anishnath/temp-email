@@ -14,7 +14,8 @@ import (
 
 // CompileRequest is the JSON body for POST /api/compile.
 type CompileRequest struct {
-	Source string `json:"source"`
+	Source  string   `json:"source"`
+	FileIDs []string `json:"fileIds"`
 }
 
 // CompileResponse is the immediate response with jobId.
@@ -58,7 +59,7 @@ func HandleCompile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job := model.NewCompileJob(req.Source)
+	job := model.NewCompileJob(req.Source, req.FileIDs)
 	model.RegisterJob(job)
 	queue.JobQueue <- job
 

@@ -24,7 +24,7 @@ func TestCompile_Integration(t *testing.T) {
 	defer os.Unsetenv("LATEX_TEMP_DIR")
 
 	source := `\documentclass{article}\begin{document}Hello World\end{document}`
-	job := model.NewCompileJob(source)
+	job := model.NewCompileJob(source, nil)
 	model.RegisterJob(job)
 	defer model.DeleteJob(job.ID)
 

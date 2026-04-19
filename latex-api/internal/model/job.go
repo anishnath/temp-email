@@ -22,6 +22,7 @@ type CompileJob struct {
 	ID        string
 	Status    JobStatus
 	Source    string
+	FileIDs   []string // uploaded file IDs to copy into job dir
 	WorkDir   string
 	PDFPath   string
 	LogLines  chan string   // streaming log lines
@@ -32,12 +33,13 @@ type CompileJob struct {
 	mu sync.RWMutex
 }
 
-// NewCompileJob creates a new job with the given source.
-func NewCompileJob(source string) *CompileJob {
+// NewCompileJob creates a new job with the given source and optional file IDs.
+func NewCompileJob(source string, fileIDs []string) *CompileJob {
 	return &CompileJob{
 		ID:        uuid.New().String(),
 		Status:    StatusPending,
 		Source:    source,
+		FileIDs:   fileIDs,
 		LogLines:  make(chan string, 256),
 		Done:      make(chan struct{}),
 		CreatedAt: time.Now(),
