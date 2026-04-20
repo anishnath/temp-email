@@ -48,7 +48,8 @@ func CopyUploadedFiles(fileIDs []string, destDir string) error {
 		uploadDir := filepath.Join(uploadsBase, fileID)
 		entries, err := os.ReadDir(uploadDir)
 		if err != nil {
-			return fmt.Errorf("fileId %q not found: %w", fileID, err)
+			// Skip missing uploads (may have been cleaned up) — not fatal
+			continue
 		}
 		for _, entry := range entries {
 			if entry.IsDir() {
