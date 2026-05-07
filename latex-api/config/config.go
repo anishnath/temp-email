@@ -18,7 +18,7 @@ type Config struct {
 
 // Load reads configuration from environment variables.
 func Load() *Config {
-	timeoutSec := getEnvInt("LATEX_TIMEOUT_SECONDS", 30)
+	timeoutSec := getEnvInt("LATEX_TIMEOUT_SECONDS", 90)
 	cleanupMin := getEnvInt("CLEANUP_AFTER_MINUTES", 60)
 	maxSourceKB := getEnvInt("MAX_SOURCE_SIZE_KB", 512)
 

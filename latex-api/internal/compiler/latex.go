@@ -3,6 +3,7 @@ package compiler
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -123,6 +124,15 @@ func Compile(job *model.CompileJob) {
 
 	if err := cmd.Wait(); err != nil {
 		wg.Wait()
+		// Distinguish a timeout from a real LaTeX syntax error — they look the
+		// same to cmd.Wait() but the document.log won't have any "!" line on
+		// timeout because pdflatex was SIGKILL'd mid-compile.
+		if ctx.Err() == context.DeadlineExceeded {
+			job.SetError(fmt.Sprintf(
+				"Compilation timed out after %s — document is too complex or stuck in a loop. "+
+					"Increase LATEX_TIMEOUT_SECONDS to allow longer runs.", timeout))
+			return
+		}
 		job.SetError(parseCompileError(job, workDir))
 		return
 	}
