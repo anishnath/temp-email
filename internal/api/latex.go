@@ -182,7 +182,7 @@ func PostTikzCompile(w http.ResponseWriter, r *http.Request) {
 			latexError(w, err.Error(), "BAD_REQUEST", http.StatusBadRequest)
 			return
 		}
-		fullSource := "\\documentclass[dvisvgm]{minimal}\\usepackage{tikz}" + parsed.TikzBlock
+		fullSource := "\\documentclass[dvisvgm]{article}\\usepackage{tikz}" + parsed.TikzBlock
 		if err := compiler.Check(fullSource); err != nil {
 			latexError(w, err.Error(), "SANITIZER_REJECTED", http.StatusBadRequest)
 			return
@@ -193,7 +193,7 @@ func PostTikzCompile(w http.ResponseWriter, r *http.Request) {
 			latexError(w, err.Error(), "BAD_REQUEST", http.StatusBadRequest)
 			return
 		}
-		fullSource := "\\documentclass[dvisvgm]{minimal}\\usepackage{tikz}" + req.Tikz
+		fullSource := "\\documentclass[dvisvgm]{article}\\usepackage{tikz}" + req.Tikz
 		if err := compiler.Check(fullSource); err != nil {
 			latexError(w, err.Error(), "SANITIZER_REJECTED", http.StatusBadRequest)
 			return

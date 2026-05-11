@@ -19,10 +19,25 @@ import (
 // TikZ document template using dvisvgm class for clean SVG output.
 // {{PACKAGES}} is replaced with user \usepackage{} and \usetikzlibrary{} lines.
 // {{TIKZ_BLOCK}} is either the full \begin{tikzpicture}...\end{tikzpicture} (from raw) or \begin{tikzpicture}\n{{TIKZ}}\n\end{tikzpicture}.
-const tikzTemplate = `\documentclass[dvisvgm]{minimal}
+//
+// tikzDefaultLibraries is preloaded for typical math/physics/chemistry diagrams, circuits,
+// CV/flow layouts, and lecture figures. Intentionally omits graphdrawing and external.
+const tikzDefaultLibraries = "arrows,arrows.meta,bending,positioning,calc,scopes,fit,backgrounds," +
+	"shapes.geometric,shapes.misc,shapes.symbols,shapes.multipart,shapes.arrows,shapes.callouts," +
+	"shapes.gates.logic.US,shapes.gates.logic.IEC," +
+	"trees,chains,matrix,mindmap,automata,graphs," +
+	"decorations.pathmorphing,decorations.pathreplacing,decorations.markings,decorations.shapes,decorations.text,decorations.fractals," +
+	"patterns,patterns.meta,intersections,angles,quotes,through," +
+	"circuits.ee.IEC,circuits.logic.US,circuits.logic.IEC," +
+	"fadings,shadows,spy,lindenmayersystems," +
+	"datavisualization,plotmarks,calendar," +
+	"er,petri,folding,fixedpointarithmetic,fpu,svg.path"
+
+const tikzTemplate = `\documentclass[dvisvgm]{article}
 \usepackage{tikz}
-\usetikzlibrary{arrows,arrows.meta,positioning,calc,shapes.geometric,trees}
+\usetikzlibrary{` + tikzDefaultLibraries + `}
 {{PACKAGES}}
+\pagestyle{empty}
 
 \begin{document}
 {{TIKZ_BLOCK}}
