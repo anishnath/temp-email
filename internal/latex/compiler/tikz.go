@@ -317,12 +317,12 @@ func CompileTikZ(j *job.CompileJob) {
 
 	dvisvgmOut, err := dvisvgmCmd.CombinedOutput()
 	if err != nil {
-		j.SetError("dvisvgm failed: " + string(dvisvgmOut))
+		j.SetError(formatDvisvgmFailure(err, dvisvgmOut))
 		return
 	}
 
 	if _, err := os.Stat(svgPath); err != nil {
-		j.SetError("SVG was not produced")
+		j.SetError("SVG was not produced (" + svgPath + "): " + err.Error())
 		return
 	}
 
@@ -384,6 +384,23 @@ func texmfDistFromKpsewhich() string {
 		return ""
 	}
 	return p
+}
+
+func formatDvisvgmFailure(err error, out []byte) string {
+	var b strings.Builder
+	b.WriteString("dvisvgm failed")
+	if err != nil {
+		b.WriteString(": ")
+		b.WriteString(err.Error())
+	}
+	s := strings.TrimSpace(string(out))
+	if s != "" {
+		b.WriteString(" | ")
+		b.WriteString(trimLatexSummary(s))
+	} else if err != nil {
+		b.WriteString(" | (no stdout/stderr; check that dvisvgm is installed and on PATH for the service user, and that TEXMFDIST/TEXMFCNF match your TeX tree)")
+	}
+	return b.String()
 }
 
 func parseInt(s string) (int, error) {
