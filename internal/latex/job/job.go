@@ -1,11 +1,21 @@
 package job
 
 import (
+	"log"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+const maxCompileLogBytes = 16384
+
+func truncateCompileLogMessage(s string) string {
+	if len(s) <= maxCompileLogBytes {
+		return s
+	}
+	return s[:maxCompileLogBytes] + "...(truncated)"
+}
 
 // Status represents the lifecycle state of a compile job.
 type Status string
@@ -66,12 +76,27 @@ func (j *CompileJob) GetStatus() Status {
 	return j.Status
 }
 
+// GetError returns the error or warning text (thread-safe).
+func (j *CompileJob) GetError() string {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.Error
+}
+
 // SetError sets error message and status to error.
 func (j *CompileJob) SetError(err string) {
 	j.mu.Lock()
-	defer j.mu.Unlock()
 	j.Error = err
 	j.Status = StatusError
+	id := j.ID
+	tikz := j.Tikz != "" || j.TikzBlock != ""
+	j.mu.Unlock()
+
+	pipeline := "latex"
+	if tikz {
+		pipeline = "tikz"
+	}
+	log.Printf("compile job error pipeline=%s job_id=%s: %s", pipeline, id, truncateCompileLogMessage(err))
 }
 
 // SetDone sets PDF path and status to done.
@@ -86,10 +111,12 @@ func (j *CompileJob) SetDone(pdfPath string) {
 // PDF was produced despite pdflatex exiting non-zero (nonstopmode continues past many error types).
 func (j *CompileJob) SetDoneWithWarning(pdfPath, warning string) {
 	j.mu.Lock()
-	defer j.mu.Unlock()
 	j.PDFPath = pdfPath
 	j.Status = StatusDone
 	j.Error = warning
+	id := j.ID
+	j.mu.Unlock()
+	log.Printf("compile job warning pipeline=latex job_id=%s: %s", id, truncateCompileLogMessage(warning))
 }
 
 // SetDoneSVG sets SVG path and status to done (for TikZ jobs).
@@ -103,10 +130,12 @@ func (j *CompileJob) SetDoneSVG(svgPath string) {
 // SetDoneSVGWithWarning sets SVG path and status to done but records a warning (e.g. latex exited non-zero but SVG was produced).
 func (j *CompileJob) SetDoneSVGWithWarning(svgPath, warning string) {
 	j.mu.Lock()
-	defer j.mu.Unlock()
 	j.SVGPath = svgPath
 	j.Status = StatusDone
 	j.Error = warning
+	id := j.ID
+	j.mu.Unlock()
+	log.Printf("compile job warning pipeline=tikz job_id=%s: %s", id, truncateCompileLogMessage(warning))
 }
 
 // NewTikzJob creates a new TikZ compile job.

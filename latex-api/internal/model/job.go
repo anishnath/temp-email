@@ -1,11 +1,21 @@
 package model
 
 import (
+	"log"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+const maxCompileLogBytes = 16384
+
+func truncateCompileLogMessage(s string) string {
+	if len(s) <= maxCompileLogBytes {
+		return s
+	}
+	return s[:maxCompileLogBytes] + "...(truncated)"
+}
 
 // JobStatus represents the lifecycle state of a compile job.
 type JobStatus string
@@ -63,9 +73,11 @@ func (j *CompileJob) GetStatus() JobStatus {
 // SetError sets error message and status to error.
 func (j *CompileJob) SetError(err string) {
 	j.mu.Lock()
-	defer j.mu.Unlock()
 	j.Error = err
 	j.Status = StatusError
+	id := j.ID
+	j.mu.Unlock()
+	log.Printf("compile job error pipeline=latex job_id=%s: %s", id, truncateCompileLogMessage(err))
 }
 
 // SetDone sets PDF path and status to done.

@@ -221,11 +221,16 @@ func GetLaTeXJobStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := LaTeXStatusResponse{JobID: j.ID, Status: string(j.GetStatus())}
-	if j.GetStatus() == job.StatusDone && j.Error != "" {
-		resp.Warning = j.Error
+	errText := j.GetError()
+	if j.GetStatus() == job.StatusDone && errText != "" {
+		resp.Warning = errText
 	}
-	if j.GetStatus() == job.StatusError && j.Error != "" {
-		resp.Error = j.Error
+	if j.GetStatus() == job.StatusError {
+		if errText != "" {
+			resp.Error = errText
+		} else {
+			resp.Error = "compilation failed (no error details)"
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
