@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"temp-email/internal/latex/filestore"
@@ -292,17 +293,19 @@ func CompileTikZ(j *job.CompileJob) {
 		return
 	}
 
-	streamOutput(stdout, stderr, j.LogLines, ctx)
+	var tail latexStreamTail
+	tail.maxLines = 200
+	var drainWG sync.WaitGroup
+	drainWG.Add(2)
+	go drainLatexPipe(stdout, &drainWG, j.LogLines, ctx, &tail)
+	go drainLatexPipe(stderr, &drainWG, j.LogLines, ctx, &tail)
 
 	latexErr := latexCmd.Wait()
+	drainWG.Wait()
+
 	dviPath := filepath.Join(workDir, "document.dvi")
 	if _, err := os.Stat(dviPath); err != nil {
-		detail := SummarizeDocumentLog(workDir)
-		if latexErr != nil {
-			j.SetError("latex failed: " + latexErr.Error() + " | " + detail)
-		} else {
-			j.SetError("DVI was not produced | " + detail)
-		}
+		j.SetError(formatLatexRunFailure(workDir, latexErr, &tail))
 		return
 	}
 
@@ -332,9 +335,14 @@ func CompileTikZ(j *job.CompileJob) {
 
 // texDistDefaults are fallback TEXMFDIST paths when env is unset (Linux vs macOS).
 var texDistDefaults = []string{
-	"/usr/share/texlive/texmf-dist",           // Debian/Ubuntu
-	"/usr/local/texlive/2025basic/texmf-dist", // macOS TeX Live
+	"/usr/share/texlive/texmf-dist", // Debian/Ubuntu
+	"/usr/share/texmf-dist",
+	"/usr/local/texlive/2026/texmf-dist",
+	"/usr/local/texlive/2025/texmf-dist",
+	"/usr/local/texlive/2025basic/texmf-dist",
 	"/usr/local/texlive/2024/texmf-dist",
+	"/usr/local/texlive/2024basic/texmf-dist",
+	"/usr/local/texlive/2023/texmf-dist",
 }
 
 func setDvisvgmEnv(cmd *exec.Cmd) {
@@ -344,6 +352,11 @@ func setDvisvgmEnv(cmd *exec.Cmd) {
 			if _, err := os.Stat(p); err == nil {
 				texDist = p
 				break
+			}
+		}
+		if texDist == "" {
+			if p := texmfDistFromKpsewhich(); p != "" {
+				texDist = p
 			}
 		}
 		if texDist == "" {
@@ -357,31 +370,82 @@ func setDvisvgmEnv(cmd *exec.Cmd) {
 	cmd.Env = append(os.Environ(), "TEXMFDIST="+texDist, "TEXMFCNF="+texCnf)
 }
 
+// texmfDistFromKpsewhich returns TEXMFDIST when kpsewhich is on PATH (works for nonstandard TeX installs).
+func texmfDistFromKpsewhich() string {
+	out, err := exec.Command("kpsewhich", "-var-value=TEXMFDIST").Output()
+	if err != nil {
+		return ""
+	}
+	p := strings.TrimSpace(string(out))
+	if p == "" {
+		return ""
+	}
+	if _, err := os.Stat(p); err != nil {
+		return ""
+	}
+	return p
+}
+
 func parseInt(s string) (int, error) {
 	var n int
 	_, err := fmt.Sscanf(s, "%d", &n)
 	return n, err
 }
 
-func streamOutput(stdout, stderr io.Reader, logLines chan string, ctx context.Context) {
-	go func() {
-		s := bufio.NewScanner(stdout)
-		for s.Scan() {
-			select {
-			case logLines <- s.Text():
-			case <-ctx.Done():
-				return
-			}
+// latexStreamTail keeps recent stdout/stderr lines when document.log is missing (e.g. format file not found).
+type latexStreamTail struct {
+	mu       sync.Mutex
+	lines    []string
+	maxLines int
+}
+
+func (t *latexStreamTail) push(line string) {
+	if t == nil || t.maxLines <= 0 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.lines = append(t.lines, line)
+	if len(t.lines) > t.maxLines {
+		t.lines = t.lines[len(t.lines)-t.maxLines:]
+	}
+}
+
+func (t *latexStreamTail) text() string {
+	if t == nil {
+		return ""
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.Join(t.lines, "\n")
+}
+
+func drainLatexPipe(r io.Reader, wg *sync.WaitGroup, logLines chan string, ctx context.Context, tail *latexStreamTail) {
+	defer wg.Done()
+	s := bufio.NewScanner(r)
+	s.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for s.Scan() {
+		line := s.Text()
+		tail.push(line)
+		select {
+		case logLines <- line:
+		case <-ctx.Done():
+			return
 		}
-	}()
-	go func() {
-		s := bufio.NewScanner(stderr)
-		for s.Scan() {
-			select {
-			case logLines <- s.Text():
-			case <-ctx.Done():
-				return
-			}
+	}
+}
+
+func formatLatexRunFailure(workDir string, latexErr error, tail *latexStreamTail) string {
+	detail := SummarizeDocumentLog(workDir)
+	if strings.HasPrefix(detail, "could not read document.log") {
+		if out := strings.TrimSpace(tail.text()); out != "" {
+			detail = detail + "\n--- latex stdout/stderr (tail) ---\n" + trimLatexSummary(out)
+		} else {
+			detail = detail + " (no stdout/stderr captured). Hint: install TeX Live's latex/DVI engine (latex.fmt), set TEXMFDIST to your tree's texmf-dist, or run `kpsewhich -var-value=TEXMFDIST` on the host."
 		}
-	}()
+	}
+	if latexErr != nil {
+		return "latex failed: " + latexErr.Error() + " | " + detail
+	}
+	return "DVI was not produced | " + detail
 }
