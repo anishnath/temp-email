@@ -1,8 +1,11 @@
 package compiler
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 // ParsedLog contains extracted errors and warnings from pdflatex output.
@@ -63,6 +66,14 @@ func ParseLog(lines []string) *ParsedLog {
 		} else if reEmergencyStop.MatchString(line) {
 			lineNum := extractLineNum(lines, i)
 			pl.Errors = append(pl.Errors, LogError{Line: lineNum, Message: "Fatal error — check syntax near line " + strconv.Itoa(lineNum), Raw: line})
+		} else if strings.HasPrefix(line, "! LaTeX Error") {
+			lineNum := extractLineNum(lines, i)
+			msg := strings.TrimSpace(strings.TrimPrefix(line, "!"))
+			pl.Errors = append(pl.Errors, LogError{Line: lineNum, Message: msg, Raw: line})
+		} else if strings.HasPrefix(line, "! Package ") && strings.Contains(line, "Error:") {
+			lineNum := extractLineNum(lines, i)
+			msg := strings.TrimSpace(strings.TrimPrefix(line, "!"))
+			pl.Errors = append(pl.Errors, LogError{Line: lineNum, Message: msg, Raw: line})
 		} else if reOverfullHbox.MatchString(line) {
 			lineNum := extractLineNum(lines, i)
 			pl.Warnings = append(pl.Warnings, LogWarning{Line: lineNum, Text: "Overfull \\hbox", Raw: line})
@@ -78,11 +89,65 @@ func extractLineNum(lines []string, errIdx int) int {
 			return n
 		}
 	}
+	for i := errIdx; i < len(lines) && i-errIdx < 15; i++ {
+		if m := reLineNum.FindStringSubmatch(lines[i]); len(m) > 1 {
+			n, _ := strconv.Atoi(m[1])
+			return n
+		}
+	}
 	return 0
+}
+
+const maxLatexLogPeekBytes = 512 * 1024
+const maxLatexSummaryLen = 4096
+
+// SummarizeDocumentLog reads document.log in workDir and returns a short explanation
+// (first structured error, else the last "! ..." block, else the log tail). Suitable for API and logs.
+func SummarizeDocumentLog(workDir string) string {
+	logPath := filepath.Join(workDir, "document.log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return "could not read document.log: " + err.Error()
+	}
+	s := string(data)
+	if len(s) > maxLatexLogPeekBytes {
+		s = s[len(s)-maxLatexLogPeekBytes:]
+	}
+	lines := strings.Split(s, "\n")
+	parsed := ParseLog(lines)
+	if len(parsed.Errors) > 0 {
+		return trimLatexSummary(parsed.Errors[0].Message)
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.HasPrefix(lines[i], "!") {
+			end := i + 15
+			if end > len(lines) {
+				end = len(lines)
+			}
+			return trimLatexSummary(strings.Join(lines[i:end], "\n"))
+		}
+	}
+	if len(lines) > 30 {
+		return trimLatexSummary(strings.Join(lines[len(lines)-30:], "\n"))
+	}
+	return trimLatexSummary(strings.TrimSpace(s))
+}
+
+func trimLatexSummary(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxLatexSummaryLen {
+		return s
+	}
+	return s[:maxLatexSummaryLen] + "…"
 }
 
 func extractCmd(lines []string, errIdx int) string {
 	for i := errIdx; i >= 0 && errIdx-i < 5; i-- {
+		if m := reUndefinedCmd.FindStringSubmatch(lines[i]); len(m) > 2 {
+			return m[2]
+		}
+	}
+	for i := errIdx; i < len(lines) && i-errIdx < 15; i++ {
 		if m := reUndefinedCmd.FindStringSubmatch(lines[i]); len(m) > 2 {
 			return m[2]
 		}

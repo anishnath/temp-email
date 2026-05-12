@@ -297,10 +297,11 @@ func CompileTikZ(j *job.CompileJob) {
 	latexErr := latexCmd.Wait()
 	dviPath := filepath.Join(workDir, "document.dvi")
 	if _, err := os.Stat(dviPath); err != nil {
+		detail := SummarizeDocumentLog(workDir)
 		if latexErr != nil {
-			j.SetError("latex failed: " + latexErr.Error())
+			j.SetError("latex failed: " + latexErr.Error() + " | " + detail)
 		} else {
-			j.SetError("DVI was not produced")
+			j.SetError("DVI was not produced | " + detail)
 		}
 		return
 	}

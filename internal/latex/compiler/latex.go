@@ -129,10 +129,10 @@ func Compile(j *job.CompileJob) {
 		pdfPath := filepath.Join(workDir, strings.TrimSuffix(documentName, ".tex")+".pdf")
 		if _, statErr := os.Stat(pdfPath); statErr == nil {
 			// PDF was produced despite errors (e.g. missing image, draft mode)
-			j.SetDoneWithWarning(pdfPath, parseCompileError(j, workDir))
+			j.SetDoneWithWarning(pdfPath, parseCompileError(workDir))
 			return
 		}
-		j.SetError(parseCompileError(j, workDir))
+		j.SetError(parseCompileError(workDir))
 		return
 	}
 	wg.Wait()
@@ -145,16 +145,13 @@ func Compile(j *job.CompileJob) {
 	j.SetDone(pdfPath)
 }
 
-func parseCompileError(j *job.CompileJob, workDir string) string {
-	logPath := filepath.Join(workDir, strings.TrimSuffix(documentName, ".tex")+".log")
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		return "Compilation failed — could not read log"
+func parseCompileError(workDir string) string {
+	summary := SummarizeDocumentLog(workDir)
+	if strings.HasPrefix(summary, "could not read document.log") {
+		return "Compilation failed — " + summary
 	}
-	lines := strings.Split(string(data), "\n")
-	parsed := ParseLog(lines)
-	if len(parsed.Errors) > 0 {
-		return parsed.Errors[0].Message
+	if summary != "" {
+		return summary
 	}
 	return "Compilation failed — check LaTeX syntax"
 }
