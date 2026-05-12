@@ -1,16 +1,14 @@
 package compiler
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"temp-email/internal/latex/filestore"
@@ -272,50 +270,30 @@ func CompileTikZ(j *job.CompileJob) {
 
 	closeLogs = true
 
-	// Run latex
+	// Run latex — single CombinedOutput (no extra goroutines / WaitGroup).
 	latexCmd := exec.CommandContext(ctx, "latex", "-interaction=nonstopmode", "document.tex")
 	latexCmd.Dir = workDir
 	setDvisvgmEnv(latexCmd)
+	log.Printf("tikz job_id=%s running latex dir=%s args=%v", j.ID, workDir, latexCmd.Args)
 
-	stdout, err := latexCmd.StdoutPipe()
-	if err != nil {
-		j.SetError("failed to create stdout pipe: " + err.Error())
-		return
-	}
-	stderr, err := latexCmd.StderrPipe()
-	if err != nil {
-		j.SetError("failed to create stderr pipe: " + err.Error())
-		return
-	}
-
-	if err := latexCmd.Start(); err != nil {
-		j.SetError("failed to start latex: " + err.Error())
-		return
-	}
-
-	var tail latexStreamTail
-	tail.maxLines = 200
-	var drainWG sync.WaitGroup
-	drainWG.Add(2)
-	go drainLatexPipe(stdout, &drainWG, j.LogLines, ctx, &tail)
-	go drainLatexPipe(stderr, &drainWG, j.LogLines, ctx, &tail)
-
-	latexErr := latexCmd.Wait()
-	drainWG.Wait()
+	latexOut, latexErr := latexCmd.CombinedOutput()
+	tikzPushLogLines(j.LogLines, string(latexOut))
 
 	dviPath := filepath.Join(workDir, "document.dvi")
 	if _, err := os.Stat(dviPath); err != nil {
-		j.SetError(formatLatexRunFailure(workDir, latexErr, &tail))
+		j.SetError(summarizeTikzLatexFailure(workDir, latexErr, latexOut))
 		return
 	}
 
-	// Run dvisvgm (even if latex exited non-zero, DVI may be usable)
+	// Run dvisvgm
 	svgPath := filepath.Join(workDir, "document.svg")
 	dvisvgmCmd := exec.CommandContext(ctx, "dvisvgm", "--no-fonts", "-o", "document.svg", "document.dvi")
 	dvisvgmCmd.Dir = workDir
 	setDvisvgmEnv(dvisvgmCmd)
+	log.Printf("tikz job_id=%s running dvisvgm dir=%s args=%v", j.ID, workDir, dvisvgmCmd.Args)
 
 	dvisvgmOut, err := dvisvgmCmd.CombinedOutput()
+	tikzPushLogLines(j.LogLines, string(dvisvgmOut))
 	if err != nil {
 		j.SetError(formatDvisvgmFailure(err, dvisvgmOut))
 		return
@@ -409,56 +387,26 @@ func parseInt(s string) (int, error) {
 	return n, err
 }
 
-// latexStreamTail keeps recent stdout/stderr lines when document.log is missing (e.g. format file not found).
-type latexStreamTail struct {
-	mu       sync.Mutex
-	lines    []string
-	maxLines int
-}
-
-func (t *latexStreamTail) push(line string) {
-	if t == nil || t.maxLines <= 0 {
-		return
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.lines = append(t.lines, line)
-	if len(t.lines) > t.maxLines {
-		t.lines = t.lines[len(t.lines)-t.maxLines:]
-	}
-}
-
-func (t *latexStreamTail) text() string {
-	if t == nil {
-		return ""
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return strings.Join(t.lines, "\n")
-}
-
-func drainLatexPipe(r io.Reader, wg *sync.WaitGroup, logLines chan string, ctx context.Context, tail *latexStreamTail) {
-	defer wg.Done()
-	s := bufio.NewScanner(r)
-	s.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for s.Scan() {
-		line := s.Text()
-		tail.push(line)
+func tikzPushLogLines(ch chan string, blob string) {
+	for _, line := range strings.Split(blob, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
 		select {
-		case logLines <- line:
-		case <-ctx.Done():
-			return
+		case ch <- line:
+		default:
 		}
 	}
 }
 
-func formatLatexRunFailure(workDir string, latexErr error, tail *latexStreamTail) string {
+func summarizeTikzLatexFailure(workDir string, latexErr error, latexOut []byte) string {
 	detail := SummarizeDocumentLog(workDir)
 	if strings.HasPrefix(detail, "could not read document.log") {
-		if out := strings.TrimSpace(tail.text()); out != "" {
-			detail = detail + "\n--- latex stdout/stderr (tail) ---\n" + trimLatexSummary(out)
+		if out := strings.TrimSpace(string(latexOut)); out != "" {
+			detail = detail + "\n--- latex stdout/stderr ---\n" + trimLatexSummary(out)
 		} else {
-			detail = detail + " (no stdout/stderr captured). Hint: install TeX Live's latex/DVI engine (latex.fmt), set TEXMFDIST to your tree's texmf-dist, or run `kpsewhich -var-value=TEXMFDIST` on the host."
+			detail = detail + " (no latex output; check latex/DVI install and TEXMFDIST)"
 		}
 	}
 	if latexErr != nil {
