@@ -28,7 +28,7 @@ const tikzDefaultLibraries = "arrows,arrows.meta,bending,positioning,calc,scopes
 	"decorations.pathmorphing,decorations.pathreplacing,decorations.markings,decorations.shapes,decorations.text,decorations.fractals," +
 	"patterns,patterns.meta,intersections,angles,quotes,through," +
 	"circuits.ee.IEC,circuits.logic.US,circuits.logic.IEC," +
-	"fadings,shadows,spy,lindenmayersystems," +
+	"fadings,shadows,pgfplots,spy,lindenmayersystems," +
 	"datavisualization,plotmarks,calendar," +
 	"er,petri,folding,fixedpointarithmetic,fpu,svg.path"
 
