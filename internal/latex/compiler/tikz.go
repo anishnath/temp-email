@@ -66,8 +66,22 @@ type ParsedRaw struct {
 	GDLibraries   []string // \usegdlibrary{...} for graph drawing
 }
 
-// reStripPreamble removes \usetikzlibrary, \usegdlibrary, \usepackage lines to avoid duplication.
-var reStripPreamble = regexp.MustCompile(`(?m)^\s*\\usetikzlibrary\s*\{[^}]*\}\s*$|^\s*\\usegdlibrary\s*\{[^}]*\}\s*$|^\s*\\usepackage\s*(?:\[[^\]]*\])?\s*\{[^}]*\}\s*$`)
+// reStripPreamble removes preamble-only commands that would either duplicate
+// or break inside the article wrapper (\documentclass{}, \begin{document},
+// \end{document}, \usepackage, \usetikzlibrary, \usegdlibrary). Without this,
+// pasting a complete \documentclass{standalone}...\end{document} document
+// leaks \documentclass and \begin{document} into the wrapper body, producing
+// "LaTeX Error: Can be used only in preamble." (latex still emits a DVI
+// under -interaction=nonstopmode, so the user sees a visibly broken render
+// rather than a hard failure).
+var reStripPreamble = regexp.MustCompile(
+	`(?m)` +
+		`^\s*\\usetikzlibrary\s*\{[^}]*\}\s*$` +
+		`|^\s*\\usegdlibrary\s*\{[^}]*\}\s*$` +
+		`|^\s*\\usepackage\s*(?:\[[^\]]*\])?\s*\{[^}]*\}\s*$` +
+		`|^\s*\\documentclass\s*(?:\[[^\]]*\])?\s*\{[^}]*\}\s*$` +
+		`|^\s*\\begin\s*\{\s*document\s*\}\s*$` +
+		`|^\s*\\end\s*\{\s*document\s*\}\s*$`)
 
 // ParseRaw extracts \usetikzlibrary, \usepackage, and the TikZ body from pasted documentation.
 // Body is either \begin{tikzpicture}...\end{tikzpicture} or \tikz \datavisualization (etc.).
