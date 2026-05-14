@@ -21,6 +21,14 @@ import (
 //
 // tikzDefaultLibraries is preloaded for typical math/physics/chemistry diagrams, circuits,
 // CV/flow layouts, and lecture figures. Intentionally omits graphdrawing and external.
+//
+// NOTE: pgfplots is a PACKAGE (\usepackage{pgfplots}), not a TikZ library.
+// Listing it in \usetikzlibrary{} produces:
+//
+//	"Package tikz Error: I did not find the tikz library 'pgfplots'."
+//
+// pgfplots support is opt-in via the user's own \usepackage{pgfplots},
+// which ParseRaw extracts and propagates through buildUserPreamble.
 const tikzDefaultLibraries = "arrows,arrows.meta,bending,positioning,calc,scopes,fit,backgrounds," +
 	"shapes.geometric,shapes.misc,shapes.symbols,shapes.multipart,shapes.arrows,shapes.callouts," +
 	"shapes.gates.logic.US,shapes.gates.logic.IEC," +
@@ -28,7 +36,7 @@ const tikzDefaultLibraries = "arrows,arrows.meta,bending,positioning,calc,scopes
 	"decorations.pathmorphing,decorations.pathreplacing,decorations.markings,decorations.shapes,decorations.text,decorations.fractals," +
 	"patterns,patterns.meta,intersections,angles,quotes,through," +
 	"circuits.ee.IEC,circuits.logic.US,circuits.logic.IEC," +
-	"fadings,shadows,pgfplots,spy,lindenmayersystems," +
+	"fadings,shadows,spy,lindenmayersystems," +
 	"datavisualization,plotmarks,calendar," +
 	"er,petri,folding,fixedpointarithmetic,fpu,svg.path"
 
