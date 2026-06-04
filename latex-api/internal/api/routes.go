@@ -5,12 +5,22 @@ import (
 )
 
 // RegisterRoutes sets up all API routes on mux. Requires Go 1.22+ for path parameters.
+// Paths are registered twice: short (/api/...) and Java-client (/api/latex/...) forms.
 func RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/compile", HandleCompile)
-	mux.HandleFunc("POST /api/upload", HandleUpload)
-	mux.HandleFunc("GET /api/jobs/{jobId}/status", handleJobStatus)
-	mux.HandleFunc("GET /api/jobs/{jobId}/pdf", handleJobPDF)
-	mux.HandleFunc("GET /api/jobs/{jobId}/logs", handleJobLogs)
+	register := func(pattern string, handler http.HandlerFunc) {
+		mux.HandleFunc(pattern, handler)
+	}
+
+	register("POST /api/compile", HandleCompile)
+	register("POST /api/latex/compile", HandleCompile)
+	register("POST /api/upload", HandleUpload)
+	register("POST /api/latex/upload", HandleUpload)
+	register("GET /api/jobs/{jobId}/status", handleJobStatus)
+	register("GET /api/latex/jobs/{jobId}/status", handleJobStatus)
+	register("GET /api/jobs/{jobId}/pdf", handleJobPDF)
+	register("GET /api/latex/jobs/{jobId}/pdf", handleJobPDF)
+	register("GET /api/jobs/{jobId}/logs", handleJobLogs)
+	register("GET /api/latex/jobs/{jobId}/logs", handleJobLogs)
 }
 
 func handleJobStatus(w http.ResponseWriter, r *http.Request) {

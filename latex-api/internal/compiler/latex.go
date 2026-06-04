@@ -18,7 +18,7 @@ import (
 
 const documentName = "document.tex"
 
-// Compile runs pdflatex on the job's source and streams logs to job.LogLines.
+// Compile runs pdflatex (and bibtex when needed) on the job's source and streams logs.
 func Compile(job *model.CompileJob) {
 	defer close(job.Done)
 
@@ -67,32 +67,89 @@ func Compile(job *model.CompileJob) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "pdflatex",
+	closeLogs = true
+
+	if err := runCompilePipeline(ctx, job, workDir); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			job.SetError(fmt.Sprintf(
+				"Compilation timed out after %s — document is too complex or stuck in a loop. "+
+					"Increase LATEX_TIMEOUT_SECONDS to allow longer runs.", timeout))
+			return
+		}
+		job.SetError(err.Error())
+		return
+	}
+
+	pdfPath := filepath.Join(workDir, documentBase+".pdf")
+	if _, err := os.Stat(pdfPath); err != nil {
+		job.SetError("PDF was not produced: " + err.Error())
+		return
+	}
+
+	job.SetDone(pdfPath)
+}
+
+func runCompilePipeline(ctx context.Context, job *model.CompileJob, workDir string) error {
+	if err := runPDFLaTeX(ctx, job, workDir); err != nil {
+		return err
+	}
+
+	if needsBibTeX(workDir) {
+		select {
+		case job.LogLines <- "=== Running BibTeX ===":
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		if err := runBibTeX(ctx, job, workDir); err != nil {
+			return err
+		}
+		for i := 0; i < 2; i++ {
+			if err := runPDFLaTeX(ctx, job, workDir); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func runPDFLaTeX(ctx context.Context, job *model.CompileJob, workDir string) error {
+	select {
+	case job.LogLines <- "=== Running pdfLaTeX ===":
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return runCommand(ctx, job, workDir, "pdflatex",
 		"-no-shell-escape",
 		"-interaction=nonstopmode",
 		documentName,
 	)
+}
+
+func runBibTeX(ctx context.Context, job *model.CompileJob, workDir string) error {
+	err := runCommand(ctx, job, workDir, "bibtex", documentBase)
+	if err != nil {
+		return fmt.Errorf("BibTeX failed — check .bib file names match \\bibliography{} and citations: %w", err)
+	}
+	return nil
+}
+
+func runCommand(ctx context.Context, job *model.CompileJob, workDir, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = workDir
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		closeLogs = true
-		job.SetError("failed to create stdout pipe: " + err.Error())
-		return
+		return fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		closeLogs = true
-		job.SetError("failed to create stderr pipe: " + err.Error())
-		return
+		return fmt.Errorf("failed to create stderr pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		closeLogs = true
-		job.SetError("failed to start pdflatex: " + err.Error())
-		return
+		return fmt.Errorf("failed to start %s: %w", name, err)
 	}
-	closeLogs = true // from here on we write to LogLines, so we must close it
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -122,35 +179,23 @@ func Compile(job *model.CompileJob) {
 		}
 	}()
 
-	if err := cmd.Wait(); err != nil {
-		wg.Wait()
-		// Distinguish a timeout from a real LaTeX syntax error — they look the
-		// same to cmd.Wait() but the document.log won't have any "!" line on
-		// timeout because pdflatex was SIGKILL'd mid-compile.
-		if ctx.Err() == context.DeadlineExceeded {
-			job.SetError(fmt.Sprintf(
-				"Compilation timed out after %s — document is too complex or stuck in a loop. "+
-					"Increase LATEX_TIMEOUT_SECONDS to allow longer runs.", timeout))
-			return
-		}
-		job.SetError(parseCompileError(job, workDir))
-		return
-	}
-
+	waitErr := cmd.Wait()
 	wg.Wait()
 
-	pdfPath := filepath.Join(workDir, strings.TrimSuffix(documentName, ".tex")+".pdf")
-	if _, err := os.Stat(pdfPath); err != nil {
-		job.SetError("PDF was not produced: " + err.Error())
-		return
+	if waitErr != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return ctx.Err()
+		}
+		if name == "pdflatex" {
+			return fmt.Errorf("%s", parseCompileError(job, workDir))
+		}
+		return waitErr
 	}
-	// closeLogs already true, defer will close job.LogLines
-
-	job.SetDone(pdfPath)
+	return nil
 }
 
 func parseCompileError(job *model.CompileJob, workDir string) string {
-	logPath := filepath.Join(workDir, strings.TrimSuffix(documentName, ".tex")+".log")
+	logPath := filepath.Join(workDir, documentBase+".log")
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		return "Compilation failed — could not read log"

@@ -3,6 +3,7 @@ package compiler
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,7 +18,7 @@ import (
 
 const documentName = "document.tex"
 
-// Compile runs pdflatex on the job's source and streams logs to job.LogLines.
+// Compile runs pdflatex (and bibtex when needed) on the job's source and streams logs.
 func Compile(j *job.CompileJob) {
 	defer close(j.Done)
 
@@ -46,7 +47,6 @@ func Compile(j *job.CompileJob) {
 		filestore.ScheduleCleanup(j.ID, time.Duration(cleanupMin)*time.Minute)
 	}()
 
-	// Copy uploaded files into job dir so LaTeX can reference them
 	for _, fileID := range j.FileIDs {
 		if err := filestore.CopyUploadToJobDir(fileID, workDir); err != nil {
 			closeLogs = true
@@ -62,7 +62,7 @@ func Compile(j *job.CompileJob) {
 		return
 	}
 
-	timeoutSec := 30
+	timeoutSec := 90
 	if v := os.Getenv("LATEX_TIMEOUT_SECONDS"); v != "" {
 		if n, _ := strconv.Atoi(v); n > 0 {
 			timeoutSec = n
@@ -71,35 +71,98 @@ func Compile(j *job.CompileJob) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "pdflatex",
+	closeLogs = true
+
+	if err := runCompilePipeline(ctx, j, workDir); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			j.SetError(fmt.Sprintf(
+				"Compilation timed out after %ds — document is too complex or stuck in a loop. "+
+					"Increase LATEX_TIMEOUT_SECONDS to allow longer runs.", timeoutSec))
+			return
+		}
+		j.SetError(err.Error())
+		return
+	}
+
+	pdfPath := filepath.Join(workDir, documentBase+".pdf")
+	if _, err := os.Stat(pdfPath); err != nil {
+		j.SetError("PDF was not produced: " + err.Error())
+		return
+	}
+
+	warning := strings.TrimSpace(SummarizeDocumentLog(workDir))
+	if warning != "" && !strings.HasPrefix(warning, "could not read document.log") {
+		j.SetDoneWithWarning(pdfPath, warning)
+		return
+	}
+	j.SetDone(pdfPath)
+}
+
+func runCompilePipeline(ctx context.Context, j *job.CompileJob, workDir string) error {
+	if err := runPDFLaTeX(ctx, j, workDir); err != nil {
+		return err
+	}
+
+	if needsBibTeX(workDir) {
+		select {
+		case j.LogLines <- "=== Running BibTeX ===":
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		if err := runBibTeX(ctx, j, workDir); err != nil {
+			return err
+		}
+		for i := 0; i < 2; i++ {
+			if err := runPDFLaTeX(ctx, j, workDir); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func runPDFLaTeX(ctx context.Context, j *job.CompileJob, workDir string) error {
+	select {
+	case j.LogLines <- "=== Running pdfLaTeX ===":
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return runCommand(ctx, j, workDir, "pdflatex",
 		"-no-shell-escape",
 		"-interaction=nonstopmode",
 		documentName,
 	)
+}
+
+func runBibTeX(ctx context.Context, j *job.CompileJob, workDir string) error {
+	err := runCommand(ctx, j, workDir, "bibtex", documentBase)
+	if err != nil {
+		return fmt.Errorf("BibTeX failed — check .bib file names match \\bibliography{} and citation keys: %w", err)
+	}
+	return nil
+}
+
+func runCommand(ctx context.Context, j *job.CompileJob, workDir, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = workDir
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		closeLogs = true
-		j.SetError("failed to create stdout pipe: " + err.Error())
-		return
+		return fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		closeLogs = true
-		j.SetError("failed to create stderr pipe: " + err.Error())
-		return
+		return fmt.Errorf("failed to create stderr pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		closeLogs = true
-		j.SetError("failed to start pdflatex: " + err.Error())
-		return
+		return fmt.Errorf("failed to start %s: %w", name, err)
 	}
-	closeLogs = true
 
 	var wg sync.WaitGroup
 	wg.Add(2)
+
 	go func() {
 		defer wg.Done()
 		scanner := bufio.NewScanner(stdout)
@@ -112,6 +175,7 @@ func Compile(j *job.CompileJob) {
 			}
 		}
 	}()
+
 	go func() {
 		defer wg.Done()
 		se := bufio.NewScanner(stderr)
@@ -124,34 +188,25 @@ func Compile(j *job.CompileJob) {
 		}
 	}()
 
-	if err := cmd.Wait(); err != nil {
-		wg.Wait()
-		pdfPath := filepath.Join(workDir, strings.TrimSuffix(documentName, ".tex")+".pdf")
-		if _, statErr := os.Stat(pdfPath); statErr == nil {
-			// PDF was produced despite errors (e.g. missing image, draft mode)
-			j.SetDoneWithWarning(pdfPath, parseCompileError(workDir))
-			return
-		}
-		j.SetError(parseCompileError(workDir))
-		return
-	}
+	waitErr := cmd.Wait()
 	wg.Wait()
 
-	pdfPath := filepath.Join(workDir, strings.TrimSuffix(documentName, ".tex")+".pdf")
-	if _, err := os.Stat(pdfPath); err != nil {
-		j.SetError("PDF was not produced: " + err.Error())
-		return
+	if waitErr != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return ctx.Err()
+		}
+		if name == "pdflatex" {
+			pdfPath := filepath.Join(workDir, documentBase+".pdf")
+			if _, statErr := os.Stat(pdfPath); statErr == nil {
+				return nil
+			}
+			summary := SummarizeDocumentLog(workDir)
+			if summary != "" {
+				return fmt.Errorf("%s", summary)
+			}
+			return fmt.Errorf("pdfLaTeX failed")
+		}
+		return waitErr
 	}
-	j.SetDone(pdfPath)
-}
-
-func parseCompileError(workDir string) string {
-	summary := SummarizeDocumentLog(workDir)
-	if strings.HasPrefix(summary, "could not read document.log") {
-		return "Compilation failed — " + summary
-	}
-	if summary != "" {
-		return summary
-	}
-	return "Compilation failed — check LaTeX syntax"
+	return nil
 }

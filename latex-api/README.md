@@ -8,7 +8,7 @@ Instance 2 in a two-instance architecture. Receives LaTeX source from Instance 1
 - **Framework**: net/http (standard library)
 - **Queue**: Buffered Go channels + goroutine worker pool
 - **Storage**: Local filesystem `/tmp/latex-jobs/`
-- **LaTeX**: pdflatex (TeX Live)
+- **LaTeX**: pdflatex + bibtex when `.aux` requests a bibliography (TeX Live)
 
 ## Project Structure
 
@@ -38,7 +38,7 @@ latex-api/
 |----------|-------------|---------|
 | `PORT` | HTTP port | 8080 |
 | `LATEX_TEMP_DIR` | Temp directory root | /tmp/latex-jobs |
-| `LATEX_TIMEOUT_SECONDS` | Compile timeout | 30 |
+| `LATEX_TIMEOUT_SECONDS` | Compile timeout (entire job: pdflatex + bibtex + extra passes) | 90 |
 | `WORKER_POOL_SIZE` | Worker goroutines | 4 |
 | `CLEANUP_AFTER_MINUTES` | Cleanup delay after job | 60 |
 | `MAX_SOURCE_SIZE_KB` | Max source size | 512 |
