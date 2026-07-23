@@ -18,6 +18,8 @@ Loaded at process startup. Defaults are conservative for a free/public service. 
 | `SEO_DB_MAX_OPEN_CONNS` | `1` | SQLite pool size |
 | `SEO_CRAWLER_USER_AGENT` | `Mozilla/5.0 (compatible; SEOCrawlBot/1.0)` | HTTP `User-Agent` |
 | `SEO_CRAWL_MAX_URLS` | `20000` | Max page reports per crawl (capped in code) |
+| `SEO_CRAWL_MAX_URLS_PRO` | `100000` | Max pages when tier `pro` (trusted internal callers only) |
+| `SEO_INTERNAL_SECRET` | *(unset)* | When set, honors `X-SEO-Internal-Secret` + `X-SEO-Tier: pro` from Tomcat servlet |
 | `SEO_HTTP_CLIENT_TIMEOUT_SEC` | `10` | Per-request HTTP timeout |
 | `SEO_CRAWL_MAX_RUNTIME_HOURS` | `2` | Max wall-clock crawl duration |
 | `SEO_CRAWL_RANDOM_DELAY_MAX_MS` | `1500` | Random delay 0…N ms before each fetch |
@@ -135,6 +137,15 @@ curl -X POST http://localhost:8080/api/seo/crawl \
 | `allow_subdomains` | bool | no | Allow subdomains of the seed host |
 | `check_external_links` | bool | no | HEAD external links for status (heavier) |
 | `user_agent` | string | no | Override crawler User-Agent for this project |
+
+**Internal tier headers** (Tomcat servlet → Go API only; not for browser clients):
+
+| Header | Description |
+|--------|-------------|
+| `X-SEO-Internal-Secret` | Must match env `SEO_INTERNAL_SECRET` |
+| `X-SEO-Tier` | `pro` → `SEO_CRAWL_MAX_URLS_PRO`; anything else → `SEO_CRAWL_MAX_URLS` |
+
+When `SEO_INTERNAL_SECRET` is unset, tier headers are ignored and every crawl uses the free limit. If the secret is set but the request header does not match, the tier falls back to **free** — `X-SEO-Tier: pro` alone is never enough.
 
 **Response 200:**
 

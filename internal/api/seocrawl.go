@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/gorilla/mux"
@@ -86,6 +87,24 @@ func initSEO() error {
 	seoIssueR = &store.IssueRepository{DB: db}
 	seoPageR = &store.PageReportRepository{DB: db}
 	return nil
+}
+
+// seoTierFromRequest returns the crawl tier for trusted internal callers only.
+// Wrong or missing X-SEO-Internal-Secret always falls back to "free" (never honors X-SEO-Tier alone).
+func seoTierFromRequest(r *http.Request) string {
+	const freeTier = "free"
+	secret := strings.TrimSpace(os.Getenv("SEO_INTERNAL_SECRET"))
+	if secret == "" {
+		return freeTier
+	}
+	if r.Header.Get("X-SEO-Internal-Secret") != secret {
+		return freeTier
+	}
+	tier := strings.ToLower(strings.TrimSpace(r.Header.Get("X-SEO-Tier")))
+	if tier == "pro" {
+		return "pro"
+	}
+	return freeTier
 }
 
 // GetSEOCrawlList returns a list of recent crawls, optionally filtered by seed URL.
@@ -181,7 +200,8 @@ func PostSEOStartCrawl(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to create project", http.StatusInternalServerError)
 		return
 	}
-	crawl, err := seoCrawl.StartCrawler(p, models.BasicAuth{})
+	crawlLimit := seoCrawl.ResolveCrawlLimit(seoTierFromRequest(r))
+	crawl, err := seoCrawl.StartCrawler(p, models.BasicAuth{}, crawlLimit)
 	if err != nil {
 		log.Printf("seo StartCrawler: %v", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)

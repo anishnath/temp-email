@@ -57,9 +57,26 @@ func NewCrawlerService(r CrawlerServiceRepository, s CrawlerServicesContainer) *
 	}
 }
 
+// ResolveCrawlLimit returns the page cap for tier ("pro" or anything else).
+func (s *CrawlerService) ResolveCrawlLimit(tier string) int {
+	if strings.EqualFold(strings.TrimSpace(tier), "pro") {
+		cl := s.config.CrawlLimitPro
+		if cl < 1 {
+			cl = 100000
+		}
+		return cl
+	}
+	cl := s.config.CrawlLimit
+	if cl < 1 {
+		cl = 20000
+	}
+	return cl
+}
+
 // StartCrawler creates a new crawler and crawls the project's URL.
+// crawlLimit <= 0 uses the default (free) limit from config.
 // It returns the new crawl row immediately; work continues in the background.
-func (s *CrawlerService) StartCrawler(p models.Project, b models.BasicAuth) (*models.Crawl, error) {
+func (s *CrawlerService) StartCrawler(p models.Project, b models.BasicAuth, crawlLimit int) (*models.Crawl, error) {
 	previousCrawl := s.repository.GetLastCrawl(&p)
 	crawl, err := s.repository.SaveCrawl(p)
 	if err != nil {
@@ -75,7 +92,7 @@ func (s *CrawlerService) StartCrawler(p models.Project, b models.BasicAuth) (*mo
 		u.Path = "/"
 	}
 
-	c, err := s.addCrawler(u, &p, &b)
+	c, err := s.addCrawler(u, &p, &b, crawlLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +190,7 @@ func (s *CrawlerService) StopCrawlerByProjectID(projectID int64) bool {
 // AddCrawler creates a new project crawler and adds it to the crawlers map. It returns the crawler
 // on success otherwise it returns an error indicating the crawler already exists or there was an
 // error creating it.
-func (s *CrawlerService) addCrawler(u *url.URL, p *models.Project, b *models.BasicAuth) (*crawler.Crawler, error) {
+func (s *CrawlerService) addCrawler(u *url.URL, p *models.Project, b *models.BasicAuth, crawlLimit int) (*crawler.Crawler, error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
@@ -185,9 +202,15 @@ func (s *CrawlerService) addCrawler(u *url.URL, p *models.Project, b *models.Bas
 	if ct < 1 {
 		ct = 10
 	}
-	cl := s.config.CrawlLimit
+	cl := crawlLimit
+	if cl < 1 {
+		cl = s.config.CrawlLimit
+	}
 	if cl < 1 {
 		cl = 20000
+	}
+	if cl > 100000 {
+		cl = 100000
 	}
 	options := &crawler.Options{
 		CrawlLimit:          cl,

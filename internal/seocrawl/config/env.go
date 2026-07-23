@@ -10,8 +10,10 @@ import (
 type CrawlerConfig struct {
 	Agent string
 
-	// CrawlLimit is the max number of page reports per crawl.
+	// CrawlLimit is the max number of page reports per crawl (free / default tier).
 	CrawlLimit int
+	// CrawlLimitPro is the max page reports per crawl when tier=pro (trusted internal callers).
+	CrawlLimitPro int
 	// ClientTimeoutSeconds is the HTTP client timeout for each request.
 	ClientTimeoutSeconds int
 	// CrawlerTimeoutHours is the max wall-clock time for a full crawl.
@@ -35,6 +37,7 @@ func LoadCrawlerFromEnv() *CrawlerConfig {
 	c := &CrawlerConfig{
 		Agent:                strings.TrimSpace(getenv("SEO_CRAWLER_USER_AGENT", "Mozilla/5.0 (compatible; SEOCrawlBot/1.0)")),
 		CrawlLimit:           getenvInt("SEO_CRAWL_MAX_URLS", 20000),
+		CrawlLimitPro:        getenvInt("SEO_CRAWL_MAX_URLS_PRO", 100000),
 		ClientTimeoutSeconds: getenvInt("SEO_HTTP_CLIENT_TIMEOUT_SEC", 10),
 		CrawlerTimeoutHours:  getenvInt("SEO_CRAWL_MAX_RUNTIME_HOURS", 2),
 		RandomDelayMaxMs:     getenvInt("SEO_CRAWL_RANDOM_DELAY_MAX_MS", 1500),
@@ -54,6 +57,15 @@ func clampCrawler(c *CrawlerConfig) {
 	}
 	if c.CrawlLimit > 100000 {
 		c.CrawlLimit = 100000
+	}
+	if c.CrawlLimitPro < 1 {
+		c.CrawlLimitPro = 1
+	}
+	if c.CrawlLimitPro > 100000 {
+		c.CrawlLimitPro = 100000
+	}
+	if c.CrawlLimitPro < c.CrawlLimit {
+		c.CrawlLimitPro = c.CrawlLimit
 	}
 	if c.ClientTimeoutSeconds < 1 {
 		c.ClientTimeoutSeconds = 1
